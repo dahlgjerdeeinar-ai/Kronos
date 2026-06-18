@@ -1,0 +1,12 @@
+flask>=3.0.0
+gunicorn>=21.0.0
+yfinance>=0.2.40
+numpy
+pandas==2.2.2
+torch>=2.0.0
+einops==0.8.1
+huggingface_hub==0.33.1
+safetensors==0.6.2
+tqdm==4.67.1
+matplotlib==3.9.3
+modal>=0.73.0
