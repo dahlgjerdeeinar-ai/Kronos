@@ -18,6 +18,19 @@ from model import Kronos, KronosTokenizer, KronosPredictor
 
 TICKERS = ["STB.OL", "TEL.OL", "EQNR.OL", "NOVO-B.CO"]
 
+
+def get_valuation_label(ev_ebitda):
+    if ev_ebitda is None:
+        return "N/A"
+    if ev_ebitda < 5:
+        return "Very cheap"
+    if ev_ebitda <= 10:
+        return "Fair"
+    if ev_ebitda <= 15:
+        return "Expensive"
+    return "Very expensive"
+
+
 tokenizer = KronosTokenizer.from_pretrained("NeoQuasar/Kronos-Tokenizer-base")
 model = Kronos.from_pretrained("NeoQuasar/Kronos-small")
 predictor = KronosPredictor(model, tokenizer, max_context=512)
@@ -40,4 +53,12 @@ for ticker in TICKERS:
     change_pct = ((avg_forecast - current_price) / current_price) * 100
 
     signal = "BUY" if change_pct > 3 else ("SELL" if change_pct < -4 else "HOLD")
-    print(f"{ticker}: {current_price:.2f} -> {avg_forecast:.2f} ({change_pct:+.1f}%) | {signal}")
+
+    info = yf.Ticker(ticker).info
+    ev_ebitda = info.get("enterpriseToEbitda")
+    roic = info.get("returnOnEquity")  # proxy for ROIC when true ROIC isn't exposed by yfinance
+    valuation_label = get_valuation_label(ev_ebitda)
+    ev_ebitda_str = f"{ev_ebitda:.1f}" if ev_ebitda is not None else "N/A"
+    roic_str = f"{roic * 100:.0f}%" if roic is not None else "N/A"
+
+    print(f"{ticker}: {current_price:.2f} -> {avg_forecast:.2f} ({change_pct:+.1f}%) | {signal} | EV/EBITDA: {ev_ebitda_str} ({valuation_label}) | ROIC: {roic_str}")
