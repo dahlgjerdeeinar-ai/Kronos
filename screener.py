@@ -7,9 +7,10 @@ DB_URL = "https://lseffer.github.io/stock_screener/stocks.db"
 DB_PATH = Path(__file__).resolve().parent / "stocks.db"
 
 MIN_MARKET_CAP = 300_000_000
-MAX_EV_EBITDA = 10
+MAX_EV_EBITDA = 15
 MIN_ROIC = 0.15
-TOP_N = 15
+MIN_RECOMMENDATION = 10  # only Strong Buy / Buy tier: ev_ebitda_ratio < 10, excludes Hold
+TOP_N = 10
 
 # Preference order for the "recency" column used to dedupe each time-series
 # table down to one row per stock.
@@ -105,10 +106,11 @@ def run_screener():
           AND (b.total_assets - b.total_current_liabilities) > 0
           AND i.ebit / (b.total_assets - b.total_current_liabilities) >= ?
           AND s.symbol NOT LIKE '%-TEMP'
+          AND p.ev_ebitda_ratio < ?
         ORDER BY p.ev_ebitda_ratio ASC
         LIMIT ?
     """
-    rows = cur.execute(query, (MIN_MARKET_CAP, MAX_EV_EBITDA, MIN_ROIC, TOP_N)).fetchall()
+    rows = cur.execute(query, (MIN_MARKET_CAP, MAX_EV_EBITDA, MIN_ROIC, MIN_RECOMMENDATION, TOP_N)).fetchall()
     conn.close()
 
     results = []
