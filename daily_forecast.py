@@ -38,11 +38,17 @@ for ticker in TICKERS:
     if ticker == "EQNR.OL":
         print(f"[DEBUG] {ticker} last 10 rows of historical input data:")
         print(x_df.tail(10))
-        print(f"[DEBUG] {ticker} raw predicted close prices for next 5 days:")
-        print(pred_df["close"].to_string())
 
-    current_price = x_df["close"].iloc[-1]
+    last_x_close = x_df["close"].iloc[-1]
+    current_price = last_x_close
     avg_forecast = pred_df["close"].mean()
     change_pct = ((avg_forecast - current_price) / current_price) * 100
+
+    print(f"[DEBUG] {ticker} last close in x_df: {last_x_close:.2f}")
+    print(f"[DEBUG] {ticker} current_price used for pct calc: {current_price:.2f}")
+    print(f"[DEBUG] {ticker} raw predicted close prices (next 5 days):")
+    print(pred_df["close"].to_string())
+    print(f"[DEBUG] {ticker} calculated percentage change: {change_pct:+.2f}%")
+
     signal = "BUY" if change_pct > 3 else ("SELL" if change_pct < -4 else "HOLD")
     print(f"{ticker}: {current_price:.2f} -> {avg_forecast:.2f} ({change_pct:+.1f}%) | {signal}")
