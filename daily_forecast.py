@@ -37,5 +37,8 @@ for ticker in TICKERS:
     current_price = df["close"].iloc[-1]
     avg_forecast = pred_df["close"].mean()
     change_pct = ((avg_forecast - current_price) / current_price) * 100
-    signal = "BUY" if change_pct > 2 else ("SELL" if change_pct < -2 else "HOLD")
+    if abs(change_pct) > 15:
+        signal = "WARNING: extreme predicted change, forecast likely unreliable"
+    else:
+        signal = "BUY" if change_pct > 3 else ("SELL" if change_pct < -4 else "HOLD")
     print(f"{ticker}: {current_price:.2f} -> {avg_forecast:.2f} ({change_pct:+.1f}%) | {signal}")
