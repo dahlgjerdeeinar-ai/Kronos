@@ -7,7 +7,7 @@ from pathlib import Path
 DB_URL = "https://lseffer.github.io/stock_screener/stocks.db"
 DB_PATH = Path(__file__).resolve().parent / "stocks.db"
 
-MIN_MARKET_CAP = 300_000_000
+MIN_MARKET_CAP = 50_000_000
 MAX_EV_EBITDA = 15
 MIN_ROIC = 0.15
 MIN_RECOMMENDATION = 10  # only Strong Buy / Buy tier: ev_ebitda_ratio < 10, excludes Hold
