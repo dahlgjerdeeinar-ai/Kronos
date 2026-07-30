@@ -2,6 +2,7 @@ name: Daily Forecast
 on:
   schedule:
     - cron: '0 7 * * 1-5'
+  workflow_dispatch:
 jobs:
   forecast:
     runs-on: ubuntu-latest
