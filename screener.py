@@ -1,5 +1,6 @@
 import json
 import sqlite3
+import sys
 import urllib.request
 from pathlib import Path
 
@@ -83,6 +84,34 @@ def run_screener():
             f"stocks: {stocks_cols}\nprices: {prices_cols}\n"
             f"income_statements: {income_cols}\nbalance_sheet_statements: {balance_cols}"
         )
+
+    debug_query = f"""
+        WITH
+        {latest_per_isin_cte("prices", price_date_col, "latest_prices")},
+        {latest_per_isin_cte("income_statements", income_date_col, "latest_income")},
+        {latest_per_isin_cte("balance_sheet_statements", balance_date_col, "latest_balance")}
+        SELECT
+            (SELECT COUNT(*) FROM stocks) AS total_stocks,
+            SUM(CASE WHEN p.market_cap >= ? THEN 1 ELSE 0 END) AS pass_market_cap,
+            SUM(CASE WHEN (b.total_assets - b.total_current_liabilities) > 0
+                      AND i.ebit / (b.total_assets - b.total_current_liabilities) >= ?
+                     THEN 1 ELSE 0 END) AS pass_roic,
+            SUM(CASE WHEN p.ev_ebitda_ratio > 0 AND p.ev_ebitda_ratio < ? THEN 1 ELSE 0 END) AS pass_ev_ebitda
+        FROM stocks s
+        JOIN latest_prices p ON s.isin = p.isin
+        JOIN latest_income i ON s.isin = i.isin
+        JOIN latest_balance b ON s.isin = b.isin
+    """
+    total_stocks, pass_market_cap, pass_roic, pass_ev_ebitda = cur.execute(
+        debug_query, (MIN_MARKET_CAP, MIN_ROIC, MAX_EV_EBITDA)
+    ).fetchone()
+    print(
+        f"[screener] total stocks: {total_stocks} | "
+        f"pass market cap (>= {MIN_MARKET_CAP:,}): {pass_market_cap} | "
+        f"pass ROIC (>= {MIN_ROIC:.0%}): {pass_roic} | "
+        f"pass EV/EBITDA (< {MAX_EV_EBITDA}): {pass_ev_ebitda}",
+        file=sys.stderr,
+    )
 
     query = f"""
         WITH
