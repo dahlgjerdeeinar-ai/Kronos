@@ -33,7 +33,7 @@ for ticker in TICKERS:
     x_timestamp = recent_df["timestamps"]
     future_dates = pd.bdate_range(start=datetime.today(), periods=6)[1:]
     y_timestamp = pd.Series(future_dates)
-    pred_df = predictor.predict(df=x_df, x_timestamp=x_timestamp, y_timestamp=y_timestamp, pred_len=6, T=1.0, top_p=0.9, sample_count=1, verbose=False)
+    pred_df = predictor.predict(df=x_df, x_timestamp=x_timestamp, y_timestamp=y_timestamp, pred_len=5, T=1.0, top_p=0.9, sample_count=1, verbose=False)
 
     current_price = x_df["close"].iloc[-1]
     avg_forecast = pred_df["close"].mean()
