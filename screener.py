@@ -7,9 +7,9 @@ DB_URL = "https://lseffer.github.io/stock_screener/stocks.db"
 DB_PATH = Path(__file__).resolve().parent / "stocks.db"
 
 MIN_MARKET_CAP = 300_000_000
-MAX_EV_EBITDA = 15
+MAX_EV_EBITDA = 10
 MIN_ROIC = 0.15
-TOP_N = 10
+TOP_N = 15
 
 # Preference order for the "recency" column used to dedupe each time-series
 # table down to one row per stock.
