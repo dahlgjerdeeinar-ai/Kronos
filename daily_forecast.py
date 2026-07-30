@@ -41,7 +41,7 @@ for ticker in TICKERS:
         print(f"[DEBUG] {ticker} raw predicted close prices for next 5 days:")
         print(pred_df["close"].to_string())
 
-    current_price = df["close"].iloc[-1]
+    current_price = x_df["close"].iloc[-1]
     avg_forecast = pred_df["close"].mean()
     change_pct = ((avg_forecast - current_price) / current_price) * 100
     signal = "BUY" if change_pct > 3 else ("SELL" if change_pct < -4 else "HOLD")
