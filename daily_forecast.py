@@ -1,3 +1,4 @@
+import json
 import sys
 import zipfile
 from pathlib import Path
@@ -31,34 +32,58 @@ def get_valuation_label(ev_ebitda):
     return "Very expensive"
 
 
-tokenizer = KronosTokenizer.from_pretrained("NeoQuasar/Kronos-Tokenizer-base")
-model = Kronos.from_pretrained("NeoQuasar/Kronos-small")
-predictor = KronosPredictor(model, tokenizer, max_context=512)
+def run_forecast():
+    tokenizer = KronosTokenizer.from_pretrained("NeoQuasar/Kronos-Tokenizer-base")
+    model = Kronos.from_pretrained("NeoQuasar/Kronos-small")
+    predictor = KronosPredictor(model, tokenizer, max_context=512)
 
-for ticker in TICKERS:
-    df = yf.download(ticker, period="6mo", interval="1d", auto_adjust=True)
-    df = df[["Open","High","Low","Close","Volume"]].dropna()
-    df.columns = ["open","high","low","close","volume"]
-    df["timestamps"] = pd.to_datetime(df.index)
-    df = df.reset_index(drop=True)
-    recent_df = df.tail(100).reset_index(drop=True)
-    x_df = recent_df[["open","high","low","close","volume"]]
-    x_timestamp = recent_df["timestamps"]
-    future_dates = pd.bdate_range(start=datetime.today(), periods=6)[1:]
-    y_timestamp = pd.Series(future_dates)
-    pred_df = predictor.predict(df=x_df, x_timestamp=x_timestamp, y_timestamp=y_timestamp, pred_len=5, T=1.0, top_p=0.9, sample_count=1, verbose=False)
+    dates = None
+    results = []
+    for ticker in TICKERS:
+        df = yf.download(ticker, period="6mo", interval="1d", auto_adjust=True)
+        df = df[["Open", "High", "Low", "Close", "Volume"]].dropna()
+        df.columns = ["open", "high", "low", "close", "volume"]
+        df["timestamps"] = pd.to_datetime(df.index)
+        df = df.reset_index(drop=True)
+        recent_df = df.tail(100).reset_index(drop=True)
+        x_df = recent_df[["open", "high", "low", "close", "volume"]]
+        x_timestamp = recent_df["timestamps"]
+        future_dates = pd.bdate_range(start=datetime.today(), periods=6)[1:]
+        y_timestamp = pd.Series(future_dates)
+        if dates is None:
+            dates = [d.strftime("%Y-%m-%d") for d in future_dates]
 
-    current_price = x_df["close"].iloc[-1]
-    avg_forecast = pred_df["close"].mean()
-    change_pct = ((avg_forecast - current_price) / current_price) * 100
+        pred_df = predictor.predict(
+            df=x_df, x_timestamp=x_timestamp, y_timestamp=y_timestamp,
+            pred_len=5, T=1.0, top_p=0.9, sample_count=1, verbose=False,
+        )
 
-    signal = "BUY" if change_pct > 3 else ("SELL" if change_pct < -4 else "HOLD")
+        current_price = float(x_df["close"].iloc[-1])
+        daily_prices = [float(p) for p in pred_df["close"].tolist()]
+        avg_forecast = float(pred_df["close"].mean())
+        change_pct = ((avg_forecast - current_price) / current_price) * 100
 
-    info = yf.Ticker(ticker).info
-    ev_ebitda = info.get("enterpriseToEbitda")
-    roic = info.get("returnOnEquity")  # proxy for ROIC when true ROIC isn't exposed by yfinance
-    valuation_label = get_valuation_label(ev_ebitda)
-    ev_ebitda_str = f"{ev_ebitda:.1f}" if ev_ebitda is not None else "N/A"
-    roic_str = f"{roic * 100:.0f}%" if roic is not None else "N/A"
+        signal = "BUY" if change_pct > 3 else ("SELL" if change_pct < -4 else "HOLD")
 
-    print(f"{ticker}: {current_price:.2f} -> {avg_forecast:.2f} ({change_pct:+.1f}%) | {signal} | EV/EBITDA: {ev_ebitda_str} ({valuation_label}) | ROIC: {roic_str}")
+        info = yf.Ticker(ticker).info
+        ev_ebitda = info.get("enterpriseToEbitda")
+        roic = info.get("returnOnEquity")  # proxy for ROIC when true ROIC isn't exposed by yfinance
+        valuation_label = get_valuation_label(ev_ebitda)
+
+        results.append({
+            "ticker": ticker,
+            "current_price": current_price,
+            "avg_forecast": avg_forecast,
+            "change_pct": change_pct,
+            "signal": signal,
+            "ev_ebitda": ev_ebitda,
+            "valuation_label": valuation_label,
+            "roic": roic,
+            "daily_prices": daily_prices,
+        })
+
+    return {"dates": dates, "tickers": results}
+
+
+if __name__ == "__main__":
+    print(json.dumps(run_forecast()))

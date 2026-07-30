@@ -1,3 +1,4 @@
+import json
 import sqlite3
 import urllib.request
 from pathlib import Path
@@ -43,7 +44,7 @@ def latest_per_isin_cte(table, date_col, alias):
     )"""
 
 
-def main():
+def run_screener():
     urllib.request.urlretrieve(DB_URL, DB_PATH)
 
     conn = sqlite3.connect(DB_PATH)
@@ -103,21 +104,26 @@ def main():
           AND p.ev_ebitda_ratio < ?
           AND (b.total_assets - b.total_current_liabilities) > 0
           AND i.ebit / (b.total_assets - b.total_current_liabilities) >= ?
+          AND s.symbol NOT LIKE '%-TEMP'
         ORDER BY p.ev_ebitda_ratio ASC
         LIMIT ?
     """
     rows = cur.execute(query, (MIN_MARKET_CAP, MAX_EV_EBITDA, MIN_ROIC, TOP_N)).fetchall()
-
-    print(f"{'Symbol':<10}{'Name':<30}{'Market Cap':>18}{'EV/EBITDA':>12}{'ROIC':>8}{'Recommendation':>16}")
-    for symbol, name, market_cap, ev_ebitda_ratio, value_score, roic in rows:
-        recommendation = get_recommendation(ev_ebitda_ratio)
-        print(
-            f"{symbol:<10}{(name or '')[:29]:<30}{market_cap:>18,.0f}"
-            f"{ev_ebitda_ratio:>12.1f}{roic * 100:>7.1f}%{recommendation:>16}"
-        )
-
     conn.close()
+
+    results = []
+    for symbol, name, market_cap, ev_ebitda_ratio, value_score, roic in rows:
+        results.append({
+            "symbol": symbol,
+            "name": name,
+            "market_cap": market_cap,
+            "ev_ebitda_ratio": ev_ebitda_ratio,
+            "value_score": value_score,
+            "roic": roic,
+            "recommendation": get_recommendation(ev_ebitda_ratio),
+        })
+    return results
 
 
 if __name__ == "__main__":
-    main()
+    print(json.dumps(run_screener()))
