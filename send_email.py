@@ -26,9 +26,10 @@ TD_STYLE = "padding:8px 10px;border-bottom:1px solid #eee;"
 H2_STYLE = "font-size:16px;border-bottom:2px solid #1a1a2e;padding-bottom:6px;margin-top:28px;"
 
 
-def run_script(name):
+def run_script(name, args=None):
+    cmd = [sys.executable, str(ROOT / name)] + list(args or [])
     result = subprocess.run(
-        [sys.executable, str(ROOT / name)],
+        cmd,
         capture_output=True,
         text=True,
         check=True,
@@ -43,10 +44,6 @@ def signal_style(label):
         if keyword in lowered:
             return f"background-color:{bg};color:{fg};font-weight:bold;"
     return ""
-
-
-def fmt_money(value):
-    return f"{value:,.0f}" if value is not None else "N/A"
 
 
 def fmt_pct(value, decimals=1):
@@ -65,20 +62,27 @@ def th_row(columns):
     return "<tr>" + "".join(f"<th style='{TH_STYLE}'>{col}</th>" for col in columns) + "</tr>"
 
 
-def build_screener_table(rows):
-    header = th_row(["Symbol", "Company", "Market Cap", "EV/EBITDA", "ROIC", "Recommendation"])
+def build_screener_table(rows, screener_forecasts):
+    header = th_row([
+        "Symbol", "Company", "EV/EBITDA", "ROIC",
+        "Fundamental Recommendation", "Kronos Signal", "5-Day Forecast %",
+    ])
     body_rows = []
     for row in rows:
         recommendation = row["recommendation"]
         roic_pct = row["roic"] * 100 if row["roic"] is not None else None
+        forecast = screener_forecasts.get(row["symbol"])
+        kronos_signal = forecast["signal"] if forecast else "N/A"
+        forecast_pct = fmt_signed_pct(forecast["change_pct"]) if forecast else "N/A"
         body_rows.append(
             "<tr>"
             f"<td style='{TD_STYLE}'>{row['symbol']}</td>"
             f"<td style='{TD_STYLE}'>{row['name']}</td>"
-            f"<td style='{TD_STYLE}'>{fmt_money(row['market_cap'])}</td>"
             f"<td style='{TD_STYLE}'>{fmt_num(row['ev_ebitda_ratio'])}</td>"
             f"<td style='{TD_STYLE}'>{fmt_pct(roic_pct)}</td>"
             f"<td style='{TD_STYLE}{signal_style(recommendation)}'>{recommendation}</td>"
+            f"<td style='{TD_STYLE}{signal_style(kronos_signal)}'>{kronos_signal}</td>"
+            f"<td style='{TD_STYLE}'>{forecast_pct}</td>"
             "</tr>"
         )
     return f"<table style='{TABLE_STYLE}'>{header}{''.join(body_rows)}</table>"
@@ -117,6 +121,7 @@ def build_html_body(screener_rows, forecast_data):
     today = date.today().isoformat()
     dates = forecast_data["dates"]
     tickers = forecast_data["tickers"]
+    screener_forecasts = forecast_data.get("screener_forecasts", {})
 
     return f"""<html>
 <body style="margin:0;padding:0;background-color:#ffffff;font-family:Arial,Helvetica,sans-serif;color:#1a1a1a;">
@@ -127,7 +132,7 @@ def build_html_body(screener_rows, forecast_data):
     </div>
     <div style="padding:0 28px 28px;">
       <h2 style="{H2_STYLE}">Top Nordic Candidates (Fundamental Screening)</h2>
-      {build_screener_table(screener_rows)}
+      {build_screener_table(screener_rows, screener_forecasts)}
       <p style="font-size:12px;color:#666;margin-top:-14px;">{EV_EBITDA_GUIDE}</p>
 
       <h2 style="{H2_STYLE}">Portfolio - 5-Day Forecast</h2>
@@ -142,12 +147,16 @@ def build_html_body(screener_rows, forecast_data):
 
 
 def build_text_body(screener_rows, forecast_data):
+    screener_forecasts = forecast_data.get("screener_forecasts", {})
     lines = [f"DAILY STOCK ANALYSIS - {date.today().isoformat()}", "", "TOP NORDIC CANDIDATES"]
     for row in screener_rows:
         roic_pct = row["roic"] * 100 if row["roic"] is not None else None
+        forecast = screener_forecasts.get(row["symbol"])
+        kronos_signal = forecast["signal"] if forecast else "N/A"
+        forecast_pct = fmt_signed_pct(forecast["change_pct"]) if forecast else "N/A"
         lines.append(
-            f"{row['symbol']} {row['name']} cap={fmt_money(row['market_cap'])} "
-            f"ev/ebitda={fmt_num(row['ev_ebitda_ratio'])} roic={fmt_pct(roic_pct)} {row['recommendation']}"
+            f"{row['symbol']} {row['name']} ev/ebitda={fmt_num(row['ev_ebitda_ratio'])} "
+            f"roic={fmt_pct(roic_pct)} {row['recommendation']} | Kronos: {kronos_signal} ({forecast_pct})"
         )
     lines += ["", "PORTFOLIO - 5-DAY FORECAST"]
     for t in forecast_data["tickers"]:
@@ -182,7 +191,8 @@ def send_email(html_body, text_body):
 
 def main():
     screener_rows = json.loads(run_script("screener.py"))
-    forecast_data = json.loads(run_script("daily_forecast.py"))
+    screener_symbols = [row["symbol"] for row in screener_rows]
+    forecast_data = json.loads(run_script("daily_forecast.py", screener_symbols))
 
     html_body = build_html_body(screener_rows, forecast_data)
     text_body = build_text_body(screener_rows, forecast_data)
