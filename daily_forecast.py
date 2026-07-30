@@ -1,5 +1,16 @@
 import sys
-sys.path.insert(0, '.')
+import zipfile
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parent
+KRONOS_DIR = ROOT / "Kronos-master"
+KRONOS_ZIP = ROOT / "Kronos-master.zip"
+
+if not KRONOS_DIR.exists() and KRONOS_ZIP.exists():
+    with zipfile.ZipFile(KRONOS_ZIP) as zf:
+        zf.extractall(ROOT)
+
+sys.path.insert(0, str(KRONOS_DIR))
 import yfinance as yf
 import pandas as pd
 from datetime import datetime
