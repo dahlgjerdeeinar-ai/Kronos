@@ -12,5 +12,8 @@ jobs:
         with:
           python-version: '3.10'
       - run: pip install yfinance torch transformers pandas einops huggingface_hub safetensors requests
-      - run: python daily_forecast.py
-      - run: python screener.py
+      - name: Run daily analysis and send email
+        env:
+          GMAIL_USER: ${{ secrets.GMAIL_USER }}
+          GMAIL_PASSWORD: ${{ secrets.GMAIL_PASSWORD }}
+        run: python send_email.py
