@@ -11,5 +11,6 @@ jobs:
       - uses: actions/setup-python@v4
         with:
           python-version: '3.10'
-      - run: pip install yfinance torch transformers pandas einops huggingface_hub safetensors
+      - run: pip install yfinance torch transformers pandas einops huggingface_hub safetensors requests
       - run: python daily_forecast.py
+      - run: python screener.py
