@@ -28,9 +28,9 @@ for ticker in TICKERS:
     df.columns = ["open","high","low","close","volume"]
     df["timestamps"] = pd.to_datetime(df.index)
     df = df.reset_index(drop=True)
-    lookback = min(100, len(df))
-    x_df = df.loc[:lookback-1, ["open","high","low","close","volume"]]
-    x_timestamp = df.loc[:lookback-1, "timestamps"]
+    recent_df = df.tail(100).reset_index(drop=True)
+    x_df = recent_df[["open","high","low","close","volume"]]
+    x_timestamp = recent_df["timestamps"]
     future_dates = pd.bdate_range(start=datetime.today(), periods=6)[1:]
     y_timestamp = pd.Series(future_dates)
     pred_df = predictor.predict(df=x_df, x_timestamp=x_timestamp, y_timestamp=y_timestamp, pred_len=5, T=1.0, top_p=0.9, sample_count=1, verbose=False)
