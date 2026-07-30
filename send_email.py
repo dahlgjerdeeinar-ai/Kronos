@@ -63,36 +63,41 @@ def th_row(columns):
 
 
 def get_kronos_forecast(screener_forecasts, symbol):
-    """Never raises: any lookup/shape problem falls back to signal N/A, pct None."""
+    """Never raises: any lookup/shape problem falls back to all fields N/A/None."""
     try:
-        forecast = screener_forecasts.get(symbol)
-        if not forecast:
-            return "N/A", None
-        return forecast["signal"], forecast["change_pct"]
+        forecast = screener_forecasts.get(symbol) or {}
     except Exception:
-        return "N/A", None
+        forecast = {}
+    return {
+        "signal": forecast.get("signal", "N/A"),
+        "change_pct": forecast.get("change_pct"),
+        "current_price": forecast.get("current_price"),
+        "avg_forecast": forecast.get("avg_forecast"),
+        "daily_prices": forecast.get("daily_prices"),
+    }
 
 
 def build_screener_table(rows, screener_forecasts):
     header = th_row([
-        "Symbol", "Company", "EV/EBITDA", "ROIC",
-        "Fundamental Recommendation", "Kronos Signal", "5-Day Forecast %",
+        "Symbol", "Company", "Current Price", "Forecast Price", "EV/EBITDA", "ROIC",
+        "Fundamental Recommendation", "Kronos Signal", "Change%",
     ])
     body_rows = []
     for row in rows:
         recommendation = row["recommendation"]
         roic_pct = row["roic"] * 100 if row["roic"] is not None else None
-        kronos_signal, forecast_change = get_kronos_forecast(screener_forecasts, row["symbol"])
-        forecast_pct = fmt_signed_pct(forecast_change)
+        kf = get_kronos_forecast(screener_forecasts, row["symbol"])
         body_rows.append(
             "<tr>"
             f"<td style='{TD_STYLE}'>{row['symbol']}</td>"
             f"<td style='{TD_STYLE}'>{row['name']}</td>"
+            f"<td style='{TD_STYLE}'>{fmt_num(kf['current_price'], 2)}</td>"
+            f"<td style='{TD_STYLE}'>{fmt_num(kf['avg_forecast'], 2)}</td>"
             f"<td style='{TD_STYLE}'>{fmt_num(row['ev_ebitda_ratio'])}</td>"
             f"<td style='{TD_STYLE}'>{fmt_pct(roic_pct)}</td>"
             f"<td style='{TD_STYLE}{signal_style(recommendation)}'>{recommendation}</td>"
-            f"<td style='{TD_STYLE}{signal_style(kronos_signal)}'>{kronos_signal}</td>"
-            f"<td style='{TD_STYLE}'>{forecast_pct}</td>"
+            f"<td style='{TD_STYLE}{signal_style(kf['signal'])}'>{kf['signal']}</td>"
+            f"<td style='{TD_STYLE}'>{fmt_signed_pct(kf['change_pct'])}</td>"
             "</tr>"
         )
     return f"<table style='{TABLE_STYLE}'>{header}{''.join(body_rows)}</table>"
@@ -118,12 +123,18 @@ def build_portfolio_table(tickers):
     return f"<table style='{TABLE_STYLE}'>{header}{''.join(body_rows)}</table>"
 
 
-def build_daily_movement_table(dates, tickers):
+def build_daily_movement_table(dates, tickers, screener_rows, screener_forecasts):
     header = th_row(["Ticker"] + dates)
     body_rows = []
     for t in tickers:
         cells = "".join(f"<td style='{TD_STYLE}'>{fmt_num(p, 2)}</td>" for p in t["daily_prices"])
         body_rows.append(f"<tr><td style='{TD_STYLE}'>{t['ticker']}</td>{cells}</tr>")
+    for row in screener_rows:
+        daily_prices = get_kronos_forecast(screener_forecasts, row["symbol"])["daily_prices"]
+        if not daily_prices:
+            continue
+        cells = "".join(f"<td style='{TD_STYLE}'>{fmt_num(p, 2)}</td>" for p in daily_prices)
+        body_rows.append(f"<tr><td style='{TD_STYLE}'>{row['symbol']}</td>{cells}</tr>")
     return f"<table style='{TABLE_STYLE}'>{header}{''.join(body_rows)}</table>"
 
 
@@ -149,7 +160,7 @@ def build_html_body(screener_rows, forecast_data):
       {build_portfolio_table(tickers)}
 
       <h2 style="{H2_STYLE}">Daily Price Movement (Predicted)</h2>
-      {build_daily_movement_table(dates, tickers)}
+      {build_daily_movement_table(dates, tickers, screener_rows, screener_forecasts)}
     </div>
   </div>
 </body>
@@ -161,11 +172,12 @@ def build_text_body(screener_rows, forecast_data):
     lines = [f"DAILY STOCK ANALYSIS - {date.today().isoformat()}", "", "TOP NORDIC CANDIDATES"]
     for row in screener_rows:
         roic_pct = row["roic"] * 100 if row["roic"] is not None else None
-        kronos_signal, forecast_change = get_kronos_forecast(screener_forecasts, row["symbol"])
-        forecast_pct = fmt_signed_pct(forecast_change)
+        kf = get_kronos_forecast(screener_forecasts, row["symbol"])
         lines.append(
             f"{row['symbol']} {row['name']} ev/ebitda={fmt_num(row['ev_ebitda_ratio'])} "
-            f"roic={fmt_pct(roic_pct)} {row['recommendation']} | Kronos: {kronos_signal} ({forecast_pct})"
+            f"roic={fmt_pct(roic_pct)} {row['recommendation']} | Kronos: "
+            f"{fmt_num(kf['current_price'], 2)} -> {fmt_num(kf['avg_forecast'], 2)} "
+            f"({fmt_signed_pct(kf['change_pct'])}) {kf['signal']}"
         )
     lines += ["", "PORTFOLIO - 5-DAY FORECAST"]
     for t in forecast_data["tickers"]:
