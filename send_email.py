@@ -1,13 +1,15 @@
 import os
-import smtplib
-import ssl
 import subprocess
 import sys
 from datetime import date
-from email.mime.text import MIMEText
 from pathlib import Path
 
+import requests
+
 ROOT = Path(__file__).resolve().parent
+
+BREVO_API_URL = "https://api.brevo.com/v3/smtp/email"
+SENDER_NAME = "Stock Analysis"
 
 SEPARATOR = "═" * 39
 EV_EBITDA_GUIDE = "EV/EBITDA guide: <5 Very cheap | 5-10 Fair | 10-15 Expensive | >15 Very expensive"
@@ -51,18 +53,22 @@ DAILY PRICE MOVEMENT (predicted)
 
 
 def send_email(body):
-    gmail_user = os.environ["GMAIL_USER"]
-    gmail_password = os.environ["GMAIL_PASSWORD"]
+    email_address = os.environ["GMAIL_ADRESS"]
+    api_key = os.environ["BREVO_API"]
 
-    msg = MIMEText(body)
-    msg["Subject"] = f"Daily Stock Analysis - {date.today().isoformat()}"
-    msg["From"] = gmail_user
-    msg["To"] = gmail_user
-
-    context = ssl.create_default_context()
-    with smtplib.SMTP_SSL("smtp.gmail.com", 465, context=context) as server:
-        server.login(gmail_user, gmail_password)
-        server.send_message(msg)
+    payload = {
+        "sender": {"name": SENDER_NAME, "email": email_address},
+        "to": [{"email": email_address}],
+        "subject": f"Daily Stock Analysis - {date.today().isoformat()}",
+        "textContent": body,
+    }
+    headers = {
+        "api-key": api_key,
+        "Content-Type": "application/json",
+        "Accept": "application/json",
+    }
+    response = requests.post(BREVO_API_URL, headers=headers, json=payload)
+    response.raise_for_status()
 
 
 def main():

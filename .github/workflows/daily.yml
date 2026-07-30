@@ -14,6 +14,6 @@ jobs:
       - run: pip install yfinance torch transformers pandas einops huggingface_hub safetensors requests
       - name: Run daily analysis and send email
         env:
-          GMAIL_USER: ${{ secrets.GMAIL_USER }}
-          GMAIL_PASSWORD: ${{ secrets.GMAIL_PASSWORD }}
+          GMAIL_ADRESS: ${{ secrets.GMAIL_ADRESS }}
+          BREVO_API: ${{ secrets.BREVO_API }}
         run: python send_email.py
