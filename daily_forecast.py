@@ -34,11 +34,15 @@ for ticker in TICKERS:
     future_dates = pd.bdate_range(start=datetime.today(), periods=6)[1:]
     y_timestamp = pd.Series(future_dates)
     pred_df = predictor.predict(df=x_df, x_timestamp=x_timestamp, y_timestamp=y_timestamp, pred_len=5, T=1.0, top_p=0.9, sample_count=1, verbose=False)
+
+    if ticker == "EQNR.OL":
+        print(f"[DEBUG] {ticker} last 10 rows of historical input data:")
+        print(x_df.tail(10))
+        print(f"[DEBUG] {ticker} raw predicted close prices for next 5 days:")
+        print(pred_df["close"].to_string())
+
     current_price = df["close"].iloc[-1]
     avg_forecast = pred_df["close"].mean()
     change_pct = ((avg_forecast - current_price) / current_price) * 100
-    if abs(change_pct) > 15:
-        signal = "WARNING: extreme predicted change, forecast likely unreliable"
-    else:
-        signal = "BUY" if change_pct > 3 else ("SELL" if change_pct < -4 else "HOLD")
+    signal = "BUY" if change_pct > 3 else ("SELL" if change_pct < -4 else "HOLD")
     print(f"{ticker}: {current_price:.2f} -> {avg_forecast:.2f} ({change_pct:+.1f}%) | {signal}")
