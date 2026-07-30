@@ -33,22 +33,11 @@ for ticker in TICKERS:
     x_timestamp = recent_df["timestamps"]
     future_dates = pd.bdate_range(start=datetime.today(), periods=6)[1:]
     y_timestamp = pd.Series(future_dates)
-    pred_df = predictor.predict(df=x_df, x_timestamp=x_timestamp, y_timestamp=y_timestamp, pred_len=5, T=1.0, top_p=0.9, sample_count=1, verbose=False)
+    pred_df = predictor.predict(df=x_df, x_timestamp=x_timestamp, y_timestamp=y_timestamp, pred_len=6, T=1.0, top_p=0.9, sample_count=1, verbose=False)
 
-    if ticker == "EQNR.OL":
-        print(f"[DEBUG] {ticker} last 10 rows of historical input data:")
-        print(x_df.tail(10))
-
-    last_x_close = x_df["close"].iloc[-1]
-    current_price = last_x_close
+    current_price = x_df["close"].iloc[-1]
     avg_forecast = pred_df["close"].mean()
     change_pct = ((avg_forecast - current_price) / current_price) * 100
-
-    print(f"[DEBUG] {ticker} last close in x_df: {last_x_close:.2f}")
-    print(f"[DEBUG] {ticker} current_price used for pct calc: {current_price:.2f}")
-    print(f"[DEBUG] {ticker} raw predicted close prices (next 5 days):")
-    print(pred_df["close"].to_string())
-    print(f"[DEBUG] {ticker} calculated percentage change: {change_pct:+.2f}%")
 
     signal = "BUY" if change_pct > 3 else ("SELL" if change_pct < -4 else "HOLD")
     print(f"{ticker}: {current_price:.2f} -> {avg_forecast:.2f} ({change_pct:+.1f}%) | {signal}")
