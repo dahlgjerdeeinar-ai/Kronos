@@ -117,8 +117,11 @@ def run_forecast(screener_symbols=None):
 
     screener_forecasts = {}
     for symbol in screener_symbols or []:
-        resolved = resolve_ticker(symbol)
-        screener_forecasts[symbol] = forecast_ticker(predictor, resolved, future_dates) if resolved else None
+        try:
+            resolved = resolve_ticker(symbol)
+            screener_forecasts[symbol] = forecast_ticker(predictor, resolved, future_dates) if resolved else None
+        except Exception:
+            screener_forecasts[symbol] = None
 
     return {"dates": dates, "tickers": results, "screener_forecasts": screener_forecasts}
 

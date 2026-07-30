@@ -62,6 +62,17 @@ def th_row(columns):
     return "<tr>" + "".join(f"<th style='{TH_STYLE}'>{col}</th>" for col in columns) + "</tr>"
 
 
+def get_kronos_forecast(screener_forecasts, symbol):
+    """Never raises: any lookup/shape problem falls back to signal N/A, pct None."""
+    try:
+        forecast = screener_forecasts.get(symbol)
+        if not forecast:
+            return "N/A", None
+        return forecast["signal"], forecast["change_pct"]
+    except Exception:
+        return "N/A", None
+
+
 def build_screener_table(rows, screener_forecasts):
     header = th_row([
         "Symbol", "Company", "EV/EBITDA", "ROIC",
@@ -71,9 +82,8 @@ def build_screener_table(rows, screener_forecasts):
     for row in rows:
         recommendation = row["recommendation"]
         roic_pct = row["roic"] * 100 if row["roic"] is not None else None
-        forecast = screener_forecasts.get(row["symbol"])
-        kronos_signal = forecast["signal"] if forecast else "N/A"
-        forecast_pct = fmt_signed_pct(forecast["change_pct"]) if forecast else "N/A"
+        kronos_signal, forecast_change = get_kronos_forecast(screener_forecasts, row["symbol"])
+        forecast_pct = fmt_signed_pct(forecast_change)
         body_rows.append(
             "<tr>"
             f"<td style='{TD_STYLE}'>{row['symbol']}</td>"
@@ -151,9 +161,8 @@ def build_text_body(screener_rows, forecast_data):
     lines = [f"DAILY STOCK ANALYSIS - {date.today().isoformat()}", "", "TOP NORDIC CANDIDATES"]
     for row in screener_rows:
         roic_pct = row["roic"] * 100 if row["roic"] is not None else None
-        forecast = screener_forecasts.get(row["symbol"])
-        kronos_signal = forecast["signal"] if forecast else "N/A"
-        forecast_pct = fmt_signed_pct(forecast["change_pct"]) if forecast else "N/A"
+        kronos_signal, forecast_change = get_kronos_forecast(screener_forecasts, row["symbol"])
+        forecast_pct = fmt_signed_pct(forecast_change)
         lines.append(
             f"{row['symbol']} {row['name']} ev/ebitda={fmt_num(row['ev_ebitda_ratio'])} "
             f"roic={fmt_pct(roic_pct)} {row['recommendation']} | Kronos: {kronos_signal} ({forecast_pct})"
