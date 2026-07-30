@@ -20,43 +20,86 @@ def find_column(columns, *keywords):
     return None
 
 
+def get_schema(cur):
+    tables = [r[0] for r in cur.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall()]
+    return {table: [r[1] for r in cur.execute(f"PRAGMA table_info({table})").fetchall()] for table in tables}
+
+
+def find_field(schema, *keywords):
+    for table, columns in schema.items():
+        col = find_column(columns, *keywords)
+        if col:
+            return table, col
+    return None, None
+
+
+def find_join_key(schema, table_a, table_b):
+    common = set(schema[table_a]) & set(schema[table_b])
+    if not common:
+        return None
+    for name in ("ticker", "symbol", "stock_id", "id"):
+        for col in common:
+            if col.lower() == name:
+                return col
+    return sorted(common)[0]
+
+
 def main():
     urllib.request.urlretrieve(DB_URL, DB_PATH)
 
     conn = sqlite3.connect(DB_PATH)
     cur = conn.cursor()
 
-    tables = [r[0] for r in cur.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall()]
-    if not tables:
+    schema = get_schema(cur)
+    if not schema:
         raise RuntimeError("No tables found in stocks.db")
-    table = tables[0]
 
-    columns = [r[1] for r in cur.execute(f"PRAGMA table_info({table})").fetchall()]
-
-    # Column names in the source DB aren't documented, so match by keyword
-    # instead of hardcoding names that might not exist.
-    col_map = {
-        "ticker": find_column(columns, "ticker") or find_column(columns, "symbol"),
-        "name": find_column(columns, "name"),
-        "tier": find_column(columns, "tier") or find_column(columns, "cap"),
-        "roic": find_column(columns, "roic"),
-        "ev_ebitda": find_column(columns, "ev", "ebitda"),
-        "piotroski": find_column(columns, "piotroski") or find_column(columns, "f_score"),
-        "magic": find_column(columns, "magic"),
+    # Fields can live in any table, so search all of them instead of
+    # assuming a single table holds everything.
+    field_keywords = {
+        "ticker": [("ticker",), ("symbol",)],
+        "name": [("name",)],
+        "tier": [("tier",), ("cap",)],
+        "roic": [("roic",)],
+        "ev_ebitda": [("ev", "ebitda")],
+        "piotroski": [("piotroski",), ("f_score",)],
+        "magic": [("magic",)],
     }
-    missing = [k for k, v in col_map.items() if v is None]
+
+    located = {}
+    for field, keyword_options in field_keywords.items():
+        for keywords in keyword_options:
+            table, col = find_field(schema, *keywords)
+            if table:
+                located[field] = (table, col)
+                break
+        else:
+            located[field] = (None, None)
+
+    missing = [f for f, (t, c) in located.items() if t is None]
     if missing:
-        raise RuntimeError(f"Could not find columns for {missing} in table '{table}'. Available columns: {columns}")
+        raise RuntimeError(f"Could not locate columns for {missing}. Schema: {schema}")
+
+    tables_needed = sorted({t for t, c in located.values()})
+    base_table = tables_needed[0]
+    from_clause = base_table
+    for other in tables_needed[1:]:
+        key = find_join_key(schema, base_table, other)
+        if not key:
+            raise RuntimeError(f"No common join key found between '{base_table}' and '{other}'. Schema: {schema}")
+        from_clause += f" JOIN {other} ON {base_table}.{key} = {other}.{key}"
+
+    select_exprs = {field: f"{table}.{col}" for field, (table, col) in located.items()}
 
     tier_placeholders = ",".join("?" for _ in CAP_TIERS)
     query = f"""
-        SELECT {col_map['ticker']}, {col_map['name']}, {col_map['roic']}, {col_map['ev_ebitda']}, {col_map['magic']}
-        FROM {table}
-        WHERE {col_map['tier']} IN ({tier_placeholders})
-          AND {col_map['roic']} > ?
-          AND {col_map['ev_ebitda']} < ?
-          AND {col_map['piotroski']} >= ?
-        ORDER BY {col_map['magic']} DESC
+        SELECT {select_exprs['ticker']}, {select_exprs['name']}, {select_exprs['roic']}, {select_exprs['ev_ebitda']}, {select_exprs['magic']}
+        FROM {from_clause}
+        WHERE {select_exprs['tier']} IN ({tier_placeholders})
+          AND {select_exprs['roic']} > ?
+          AND {select_exprs['ev_ebitda']} < ?
+          AND {select_exprs['piotroski']} >= ?
+        ORDER BY {select_exprs['magic']} DESC
         LIMIT ?
     """
     params = (*CAP_TIERS, MIN_ROIC_PCT, MAX_EV_EBITDA, MIN_PIOTROSKI, TOP_N)
