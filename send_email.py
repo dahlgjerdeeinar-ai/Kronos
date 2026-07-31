@@ -26,7 +26,7 @@ TD_STYLE = "padding:8px 10px;border-bottom:1px solid #eee;"
 H2_STYLE = "font-size:16px;border-bottom:2px solid #1a1a2e;padding-bottom:6px;margin-top:28px;"
 
 
-def run_script(name, args=None):
+def run_script(name, args=None, echo_stderr=False):
     cmd = [sys.executable, str(ROOT / name)] + list(args or [])
     result = subprocess.run(
         cmd,
@@ -35,6 +35,8 @@ def run_script(name, args=None):
         check=True,
         cwd=ROOT,
     )
+    if echo_stderr and result.stderr:
+        print(result.stderr.rstrip("\n"))
     return result.stdout.strip()
 
 
@@ -211,7 +213,7 @@ def send_email(html_body, text_body):
 
 
 def main():
-    screener_rows = json.loads(run_script("screener.py"))
+    screener_rows = json.loads(run_script("screener.py", echo_stderr=True))
     screener_symbols = [row["symbol"] for row in screener_rows]
     forecast_data = json.loads(run_script("daily_forecast.py", screener_symbols))
 
