@@ -1,7 +1,10 @@
 import json
 import sqlite3
+import sys
 import urllib.request
 from pathlib import Path
+
+import yfinance as yf
 
 DB_URL = "https://lseffer.github.io/stock_screener/stocks.db"
 DB_PATH = Path(__file__).resolve().parent / "stocks.db"
@@ -59,15 +62,32 @@ def closest_to_date_cte(table, date_col, alias, target_date_expr):
     )"""
 
 
+def print_sample_stocks(cur):
+    rows = cur.execute("SELECT isin, name, symbol, sector FROM stocks LIMIT 5").fetchall()
+    print("[screener] sample stocks rows (isin, name, symbol, sector):", file=sys.stderr)
+    for row in rows:
+        print(f"[screener]   {row}", file=sys.stderr)
+
+
+def fetch_sector_from_yfinance(yahoo_ticker):
+    try:
+        return yf.Ticker(yahoo_ticker).info.get("sector")
+    except Exception:
+        return None
+
+
 def run_screener():
     urllib.request.urlretrieve(DB_URL, DB_PATH)
 
     conn = sqlite3.connect(DB_PATH)
     cur = conn.cursor()
 
+    print_sample_stocks(cur)
+
     stocks_cols = table_columns(cur, "stocks")
     prices_cols = table_columns(cur, "prices")
     price_history_cols = table_columns(cur, "price_history")
+    has_yahoo_ticker = "yahoo_ticker" in stocks_cols
 
     price_date_col = find_column(prices_cols, DATE_COLUMN_CANDIDATES)
     ph_date_col = find_column(price_history_cols, DATE_COLUMN_CANDIDATES)
@@ -111,6 +131,7 @@ def run_screener():
                 s.symbol,
                 s.name,
                 s.sector,
+                {"s.yahoo_ticker" if has_yahoo_ticker else "NULL"} AS yahoo_ticker,
                 p.market_cap,
                 p.ev_ebitda_ratio,
                 m.momentum_6m
@@ -130,7 +151,7 @@ def run_screener():
             FROM eligible
         )
         SELECT
-            symbol, name, sector, market_cap, ev_ebitda_ratio, momentum_6m,
+            symbol, name, sector, yahoo_ticker, market_cap, ev_ebitda_ratio, momentum_6m,
             ({MAGIC_FORMULA_WEIGHT} * magic_formula_rank + {MOMENTUM_WEIGHT} * momentum_rank) AS combined_score
         FROM ranked
         ORDER BY combined_score ASC
@@ -140,7 +161,9 @@ def run_screener():
     conn.close()
 
     results = []
-    for symbol, name, sector, market_cap, ev_ebitda_ratio, momentum_6m, combined_score in rows:
+    for symbol, name, sector, yahoo_ticker, market_cap, ev_ebitda_ratio, momentum_6m, combined_score in rows:
+        if not sector and yahoo_ticker:
+            sector = fetch_sector_from_yfinance(yahoo_ticker)
         results.append({
             "symbol": symbol,
             "name": name,
