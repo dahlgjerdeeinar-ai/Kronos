@@ -1,6 +1,5 @@
 import json
 import sqlite3
-import sys
 import urllib.request
 from pathlib import Path
 
@@ -8,14 +7,15 @@ DB_URL = "https://lseffer.github.io/stock_screener/stocks.db"
 DB_PATH = Path(__file__).resolve().parent / "stocks.db"
 
 MIN_MARKET_CAP = 50_000_000
-MAX_EV_EBITDA = 15
-MIN_ROIC = 0.15
-MIN_RECOMMENDATION = 10  # only Strong Buy / Buy tier: ev_ebitda_ratio < 10, excludes Hold
 TOP_N = 10
+
+MAGIC_FORMULA_WEIGHT = 0.6
+MOMENTUM_WEIGHT = 0.4
 
 # Preference order for the "recency" column used to dedupe each time-series
 # table down to one row per stock.
-DATE_COLUMN_CANDIDATES = ["market_date", "dw_modified", "report_date", "period_end_date", "fiscal_date", "date"]
+DATE_COLUMN_CANDIDATES = ["market_date", "trade_date", "dw_modified", "report_date", "period_end_date", "fiscal_date", "date"]
+PRICE_COLUMN_CANDIDATES = ["close_price", "close", "adjusted_close", "adj_close", "price"]
 
 
 def get_recommendation(ev_ebitda_ratio):
@@ -30,8 +30,8 @@ def table_columns(cur, table):
     return [r[1] for r in cur.execute(f"PRAGMA table_info({table})").fetchall()]
 
 
-def find_date_column(columns):
-    for candidate in DATE_COLUMN_CANDIDATES:
+def find_column(columns, candidates):
+    for candidate in candidates:
         if candidate in columns:
             return candidate
     return None
@@ -46,37 +46,17 @@ def latest_per_isin_cte(table, date_col, alias):
     )"""
 
 
-def find_columns_matching(schema, keywords):
-    matches = []
-    for table, columns in schema.items():
-        for col in columns:
-            lname = col.lower()
-            if any(k in lname for k in keywords):
-                matches.append(f"{table}.{col}")
-    return matches
-
-
-def print_schema_debug(cur):
-    """Dump every table's columns, then flag ones relevant to a future
-    multi-factor score (momentum, sector, price history)."""
-    tables = [r[0] for r in cur.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall()]
-    schema = {table: table_columns(cur, table) for table in tables}
-
-    print(f"[screener] tables in database: {tables}", file=sys.stderr)
-    for table, columns in schema.items():
-        print(f"[screener] {table} columns: {columns}", file=sys.stderr)
-
-    momentum_cols = find_columns_matching(schema, ["momentum"])
-    sector_cols = find_columns_matching(schema, ["sector"])
-    price_history_cols = find_columns_matching(schema, ["price", "history"])
-    if "price_history" in schema:
-        price_history_cols = sorted(set(price_history_cols) | {f"price_history.{c}" for c in schema["price_history"]})
-
-    print(f"[screener] momentum-related columns: {momentum_cols}", file=sys.stderr)
-    print(f"[screener] sector-related columns: {sector_cols}", file=sys.stderr)
-    print(f"[screener] price-history-related columns: {price_history_cols}", file=sys.stderr)
-
-    return schema
+def closest_to_date_cte(table, date_col, alias, target_date_expr):
+    return f"""{alias} AS (
+        SELECT * FROM (
+            SELECT {table}.*,
+                   ROW_NUMBER() OVER (
+                       PARTITION BY isin
+                       ORDER BY ABS(JULIANDAY({date_col}) - JULIANDAY({target_date_expr})) ASC
+                   ) AS rn
+            FROM {table}
+        ) WHERE rn = 1
+    )"""
 
 
 def run_screener():
@@ -85,107 +65,89 @@ def run_screener():
     conn = sqlite3.connect(DB_PATH)
     cur = conn.cursor()
 
-    print_schema_debug(cur)
-
     stocks_cols = table_columns(cur, "stocks")
     prices_cols = table_columns(cur, "prices")
-    income_cols = table_columns(cur, "income_statements")
-    balance_cols = table_columns(cur, "balance_sheet_statements")
+    price_history_cols = table_columns(cur, "price_history")
 
-    price_date_col = find_date_column(prices_cols)
-    income_date_col = find_date_column(income_cols)
-    balance_date_col = find_date_column(balance_cols)
+    price_date_col = find_column(prices_cols, DATE_COLUMN_CANDIDATES)
+    ph_date_col = find_column(price_history_cols, DATE_COLUMN_CANDIDATES)
+    ph_close_col = find_column(price_history_cols, PRICE_COLUMN_CANDIDATES)
 
     required = {
         "stocks.isin": "isin" in stocks_cols,
         "stocks.symbol": "symbol" in stocks_cols,
         "stocks.name": "name" in stocks_cols,
+        "stocks.sector": "sector" in stocks_cols,
         "prices.isin": "isin" in prices_cols,
         "prices.market_cap": "market_cap" in prices_cols,
         "prices.ev_ebitda_ratio": "ev_ebitda_ratio" in prices_cols,
         "prices date column": price_date_col is not None,
-        "income_statements.isin": "isin" in income_cols,
-        "income_statements.ebit": "ebit" in income_cols,
-        "income_statements date column": income_date_col is not None,
-        "balance_sheet_statements.isin": "isin" in balance_cols,
-        "balance_sheet_statements.total_assets": "total_assets" in balance_cols,
-        "balance_sheet_statements.total_current_liabilities": "total_current_liabilities" in balance_cols,
-        "balance_sheet_statements date column": balance_date_col is not None,
+        "price_history.isin": "isin" in price_history_cols,
+        "price_history date column": ph_date_col is not None,
+        "price_history close-price column": ph_close_col is not None,
     }
     missing = [k for k, ok in required.items() if not ok]
     if missing:
         raise RuntimeError(
             f"Missing expected columns/date fields: {missing}\n"
-            f"stocks: {stocks_cols}\nprices: {prices_cols}\n"
-            f"income_statements: {income_cols}\nbalance_sheet_statements: {balance_cols}"
+            f"stocks: {stocks_cols}\nprices: {prices_cols}\nprice_history: {price_history_cols}"
         )
-
-    debug_query = f"""
-        WITH
-        {latest_per_isin_cte("prices", price_date_col, "latest_prices")},
-        {latest_per_isin_cte("income_statements", income_date_col, "latest_income")},
-        {latest_per_isin_cte("balance_sheet_statements", balance_date_col, "latest_balance")}
-        SELECT
-            (SELECT COUNT(*) FROM stocks) AS total_stocks,
-            SUM(CASE WHEN p.market_cap >= ? THEN 1 ELSE 0 END) AS pass_market_cap,
-            SUM(CASE WHEN (b.total_assets - b.total_current_liabilities) > 0
-                      AND i.ebit / (b.total_assets - b.total_current_liabilities) >= ?
-                     THEN 1 ELSE 0 END) AS pass_roic,
-            SUM(CASE WHEN p.ev_ebitda_ratio > 0 AND p.ev_ebitda_ratio < ? THEN 1 ELSE 0 END) AS pass_ev_ebitda
-        FROM stocks s
-        JOIN latest_prices p ON s.isin = p.isin
-        JOIN latest_income i ON s.isin = i.isin
-        JOIN latest_balance b ON s.isin = b.isin
-    """
-    total_stocks, pass_market_cap, pass_roic, pass_ev_ebitda = cur.execute(
-        debug_query, (MIN_MARKET_CAP, MIN_ROIC, MAX_EV_EBITDA)
-    ).fetchone()
-    print(
-        f"[screener] total stocks: {total_stocks} | "
-        f"pass market cap (>= {MIN_MARKET_CAP:,}): {pass_market_cap} | "
-        f"pass ROIC (>= {MIN_ROIC:.0%}): {pass_roic} | "
-        f"pass EV/EBITDA (< {MAX_EV_EBITDA}): {pass_ev_ebitda}",
-        file=sys.stderr,
-    )
 
     query = f"""
         WITH
         {latest_per_isin_cte("prices", price_date_col, "latest_prices")},
-        {latest_per_isin_cte("income_statements", income_date_col, "latest_income")},
-        {latest_per_isin_cte("balance_sheet_statements", balance_date_col, "latest_balance")}
+        {latest_per_isin_cte("price_history", ph_date_col, "latest_ph")},
+        {closest_to_date_cte("price_history", ph_date_col, "base_ph", "DATE('now', '-6 months')")},
+        momentum AS (
+            SELECT
+                l.isin,
+                (l.{ph_close_col} - b.{ph_close_col}) / b.{ph_close_col} * 100.0 AS momentum_6m
+            FROM latest_ph l
+            JOIN base_ph b ON l.isin = b.isin
+            WHERE b.{ph_close_col} > 0
+        ),
+        eligible AS (
+            SELECT
+                s.symbol,
+                s.name,
+                s.sector,
+                p.market_cap,
+                p.ev_ebitda_ratio,
+                m.momentum_6m
+            FROM stocks s
+            JOIN latest_prices p ON s.isin = p.isin
+            JOIN momentum m ON s.isin = m.isin
+            WHERE p.market_cap >= ?
+              AND p.ev_ebitda_ratio > 0
+              AND m.momentum_6m > 0
+              AND s.symbol NOT LIKE '%-TEMP'
+        ),
+        ranked AS (
+            SELECT
+                *,
+                RANK() OVER (ORDER BY ev_ebitda_ratio ASC) AS magic_formula_rank,
+                RANK() OVER (ORDER BY momentum_6m DESC) AS momentum_rank
+            FROM eligible
+        )
         SELECT
-            s.symbol,
-            s.name,
-            p.market_cap,
-            p.ev_ebitda_ratio,
-            1.0 / p.ev_ebitda_ratio AS value_score,
-            i.ebit / (b.total_assets - b.total_current_liabilities) AS roic
-        FROM stocks s
-        JOIN latest_prices p ON s.isin = p.isin
-        JOIN latest_income i ON s.isin = i.isin
-        JOIN latest_balance b ON s.isin = b.isin
-        WHERE p.market_cap >= ?
-          AND p.ev_ebitda_ratio > 0
-          AND p.ev_ebitda_ratio < ?
-          AND (b.total_assets - b.total_current_liabilities) > 0
-          AND i.ebit / (b.total_assets - b.total_current_liabilities) >= ?
-          AND s.symbol NOT LIKE '%-TEMP'
-          AND p.ev_ebitda_ratio < ?
-        ORDER BY p.ev_ebitda_ratio ASC
+            symbol, name, sector, market_cap, ev_ebitda_ratio, momentum_6m,
+            ({MAGIC_FORMULA_WEIGHT} * magic_formula_rank + {MOMENTUM_WEIGHT} * momentum_rank) AS combined_score
+        FROM ranked
+        ORDER BY combined_score ASC
         LIMIT ?
     """
-    rows = cur.execute(query, (MIN_MARKET_CAP, MAX_EV_EBITDA, MIN_ROIC, MIN_RECOMMENDATION, TOP_N)).fetchall()
+    rows = cur.execute(query, (MIN_MARKET_CAP, TOP_N)).fetchall()
     conn.close()
 
     results = []
-    for symbol, name, market_cap, ev_ebitda_ratio, value_score, roic in rows:
+    for symbol, name, sector, market_cap, ev_ebitda_ratio, momentum_6m, combined_score in rows:
         results.append({
             "symbol": symbol,
             "name": name,
+            "sector": sector,
             "market_cap": market_cap,
-            "ev_ebitda_ratio": ev_ebitda_ratio,
-            "value_score": value_score,
-            "roic": roic,
+            "ev_ebitda": ev_ebitda_ratio,
+            "momentum_6m": momentum_6m,
             "recommendation": get_recommendation(ev_ebitda_ratio),
         })
     return results
