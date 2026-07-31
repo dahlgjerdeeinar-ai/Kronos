@@ -48,6 +48,18 @@ def signal_style(label):
     return ""
 
 
+def quant_score_style(score):
+    if score is None:
+        return ""
+    if score >= 80:
+        return "background-color:#2d7a2d;color:#ffffff;font-weight:bold;"
+    if score >= 60:
+        return "background-color:#90EE90;color:#1a1a1a;font-weight:bold;"
+    if score >= 40:
+        return "background-color:#FFD700;color:#1a1a1a;font-weight:bold;"
+    return ""
+
+
 def fmt_pct(value, decimals=1):
     return f"{value:.{decimals}f}%" if value is not None else "N/A"
 
@@ -81,12 +93,12 @@ def get_kronos_forecast(screener_forecasts, symbol):
 
 def build_screener_table(rows, screener_forecasts):
     header = th_row([
-        "Symbol", "Company", "Sector", "Current Price", "Forecast Price", "EV/EBITDA", "Momentum 6M",
-        "Fundamental Recommendation", "Kronos Signal", "Change%",
+        "Symbol", "Company", "Sector", "Current Price", "Forecast Price", "EV/EBITDA",
+        "Momentum 6M", "Momentum 12M", "Piotroski", "Quant Score", "Kronos Signal", "Change%",
     ])
     body_rows = []
     for row in rows:
-        recommendation = row["recommendation"]
+        quant_score = row.get("quant_score")
         kf = get_kronos_forecast(screener_forecasts, row["symbol"])
         body_rows.append(
             "<tr>"
@@ -96,8 +108,10 @@ def build_screener_table(rows, screener_forecasts):
             f"<td style='{TD_STYLE}'>{fmt_num(kf['current_price'], 2)}</td>"
             f"<td style='{TD_STYLE}'>{fmt_num(kf['avg_forecast'], 2)}</td>"
             f"<td style='{TD_STYLE}'>{fmt_num(row['ev_ebitda'])}</td>"
-            f"<td style='{TD_STYLE}'>{fmt_signed_pct(row['momentum_6m'])}</td>"
-            f"<td style='{TD_STYLE}{signal_style(recommendation)}'>{recommendation}</td>"
+            f"<td style='{TD_STYLE}'>{fmt_signed_pct(row.get('momentum_6m'))}</td>"
+            f"<td style='{TD_STYLE}'>{fmt_signed_pct(row.get('momentum_12m'))}</td>"
+            f"<td style='{TD_STYLE}'>{fmt_num(row.get('piotroski'))}</td>"
+            f"<td style='{TD_STYLE}{quant_score_style(quant_score)}'>{fmt_num(quant_score)}</td>"
             f"<td style='{TD_STYLE}{signal_style(kf['signal'])}'>{kf['signal']}</td>"
             f"<td style='{TD_STYLE}'>{fmt_signed_pct(kf['change_pct'])}</td>"
             "</tr>"
@@ -176,7 +190,9 @@ def build_text_body(screener_rows, forecast_data):
         kf = get_kronos_forecast(screener_forecasts, row["symbol"])
         lines.append(
             f"{row['symbol']} {row['name']} ({row['sector']}) ev/ebitda={fmt_num(row['ev_ebitda'])} "
-            f"momentum_6m={fmt_signed_pct(row['momentum_6m'])} {row['recommendation']} | Kronos: "
+            f"momentum_6m={fmt_signed_pct(row.get('momentum_6m'))} momentum_12m={fmt_signed_pct(row.get('momentum_12m'))} "
+            f"piotroski={fmt_num(row.get('piotroski'))} quant_score={fmt_num(row.get('quant_score'))} "
+            f"({row['recommendation']}) | Kronos: "
             f"{fmt_num(kf['current_price'], 2)} -> {fmt_num(kf['avg_forecast'], 2)} "
             f"({fmt_signed_pct(kf['change_pct'])}) {kf['signal']}"
         )
