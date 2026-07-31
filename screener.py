@@ -46,11 +46,46 @@ def latest_per_isin_cte(table, date_col, alias):
     )"""
 
 
+def find_columns_matching(schema, keywords):
+    matches = []
+    for table, columns in schema.items():
+        for col in columns:
+            lname = col.lower()
+            if any(k in lname for k in keywords):
+                matches.append(f"{table}.{col}")
+    return matches
+
+
+def print_schema_debug(cur):
+    """Dump every table's columns, then flag ones relevant to a future
+    multi-factor score (momentum, sector, price history)."""
+    tables = [r[0] for r in cur.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall()]
+    schema = {table: table_columns(cur, table) for table in tables}
+
+    print(f"[screener] tables in database: {tables}", file=sys.stderr)
+    for table, columns in schema.items():
+        print(f"[screener] {table} columns: {columns}", file=sys.stderr)
+
+    momentum_cols = find_columns_matching(schema, ["momentum"])
+    sector_cols = find_columns_matching(schema, ["sector"])
+    price_history_cols = find_columns_matching(schema, ["price", "history"])
+    if "price_history" in schema:
+        price_history_cols = sorted(set(price_history_cols) | {f"price_history.{c}" for c in schema["price_history"]})
+
+    print(f"[screener] momentum-related columns: {momentum_cols}", file=sys.stderr)
+    print(f"[screener] sector-related columns: {sector_cols}", file=sys.stderr)
+    print(f"[screener] price-history-related columns: {price_history_cols}", file=sys.stderr)
+
+    return schema
+
+
 def run_screener():
     urllib.request.urlretrieve(DB_URL, DB_PATH)
 
     conn = sqlite3.connect(DB_PATH)
     cur = conn.cursor()
+
+    print_schema_debug(cur)
 
     stocks_cols = table_columns(cur, "stocks")
     prices_cols = table_columns(cur, "prices")
