@@ -2,6 +2,7 @@ import json
 import os
 import subprocess
 import sys
+from collections import Counter
 from datetime import date
 from pathlib import Path
 
@@ -12,18 +13,83 @@ ROOT = Path(__file__).resolve().parent
 BREVO_API_URL = "https://api.brevo.com/v3/smtp/email"
 SENDER_NAME = "Stock Analysis"
 
-EV_EBITDA_GUIDE = "EV/EBITDA guide: &lt;5 Very cheap | 5-10 Fair | 10-15 Expensive | &gt;15 Very expensive"
+EMAIL_TEMPLATE = """<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+</head>
+<body style="margin:0;padding:0;background:#e8e4dc;">
+<div style="max-width:620px;margin:20px auto;border-radius:8px;overflow:hidden;border:1px solid #222;font-family:Georgia,serif;">
 
-SIGNAL_COLORS = {
-    "sell": ("#f8d7da", "#721c24"),
-    "buy": ("#d4edda", "#155724"),
-    "hold": ("#fff3cd", "#856404"),
-}
+  <div style="background:#0a0f0a;padding:24px 28px;border-bottom:2px solid #00ff41;">
+    <div style="font-family:-apple-system,sans-serif;font-size:10px;color:#00C8FF;letter-spacing:3px;text-transform:uppercase;margin-bottom:6px;">Nordic Quant System · Daily Brief</div>
+    <div style="font-size:22px;font-weight:normal;color:#ffffff;">Morning Memo</div>
+    <div style="font-family:-apple-system,sans-serif;font-size:11px;color:#555;margin-top:4px;">{date} · 07:00 CET</div>
+  </div>
 
-TABLE_STYLE = "width:100%;border-collapse:collapse;margin:8px 0 20px;font-size:13px;"
-TH_STYLE = "text-align:left;padding:8px 10px;background:#f2f2f2;border-bottom:2px solid #ddd;"
-TD_STYLE = "padding:8px 10px;border-bottom:1px solid #eee;"
-H2_STYLE = "font-size:16px;border-bottom:2px solid #1a1a2e;padding-bottom:6px;margin-top:28px;"
+  <div style="background:#faf8f3;padding:24px 28px;">
+
+    <div style="font-family:-apple-system,sans-serif;font-size:10px;color:#555;letter-spacing:2px;text-transform:uppercase;margin-bottom:14px;border-bottom:1px solid #222;padding-bottom:6px;">Topp nordiske kandidater</div>
+    <table style="width:100%;font-size:13px;border-collapse:collapse;font-family:-apple-system,sans-serif;">
+      <tr style="font-size:10px;color:#888;">
+        <td style="padding:4px 0;">Selskap</td>
+        <td style="padding:4px 8px;text-align:center;">Score</td>
+        <td style="padding:4px 8px;text-align:center;">EV/E</td>
+        <td style="padding:4px 8px;text-align:center;">Kronos</td>
+        <td style="padding:4px 8px;text-align:right;">5D</td>
+      </tr>
+      {screener_rows}
+    </table>
+
+    <div style="font-family:-apple-system,sans-serif;font-size:10px;color:#555;letter-spacing:2px;text-transform:uppercase;margin:24px 0 14px;border-bottom:1px solid #222;padding-bottom:6px;">Portefølje · 5-dagers prognose</div>
+    <table style="width:100%;font-size:13px;border-collapse:collapse;font-family:-apple-system,sans-serif;">
+      {portfolio_rows}
+    </table>
+
+    <div style="font-family:-apple-system,sans-serif;font-size:10px;color:#555;letter-spacing:2px;text-transform:uppercase;margin:24px 0 14px;border-bottom:1px solid #222;padding-bottom:6px;">Daglig prisutvikling (prognose)</div>
+    <table style="width:100%;font-size:12px;border-collapse:collapse;font-family:-apple-system,sans-serif;">
+      {movement_rows}
+    </table>
+
+    <div style="margin-top:24px;background:#f0ede6;border-left:3px solid #0a0f0a;padding:14px 16px;border-radius:0 4px 4px 0;">
+      <div style="font-family:-apple-system,sans-serif;font-size:10px;color:#555;letter-spacing:2px;text-transform:uppercase;margin-bottom:8px;">Markedsanalyse</div>
+      <div style="font-size:13px;color:#333;line-height:1.8;font-style:italic;">{market_analysis}</div>
+    </div>
+
+  </div>
+
+  <div style="background:#0a0f0a;padding:12px 28px;font-family:-apple-system,sans-serif;font-size:10px;color:#444;display:flex;justify-content:space-between;">
+    <span>Einar's Nordic Quant System</span>
+    <span style="color:#00ff41;">&#9679; System operativt</span>
+  </div>
+
+</div>
+</body>
+</html>"""
+
+SCREENER_ROW = """
+<tr style="border-top:1px solid #e8e4dc;">
+  <td style="padding:10px 0;"><strong>{name}</strong><br><span style="font-size:11px;color:#888;">{sector} &middot; {momentum_6m} 6M</span></td>
+  <td style="padding:10px 8px;text-align:center;"><span style="background:#0a0f0a;color:{score_color};padding:3px 8px;border-radius:4px;font-size:12px;font-family:'Courier New',monospace;">{quant_score}</span></td>
+  <td style="padding:10px 8px;text-align:center;color:#555;">{ev_ebitda}</td>
+  <td style="padding:10px 8px;text-align:center;color:{signal_color};font-weight:bold;font-family:-apple-system,sans-serif;">&bull; {kronos_signal}</td>
+  <td style="padding:10px 8px;text-align:right;color:{signal_color};font-weight:bold;font-family:-apple-system,sans-serif;">{change_pct}</td>
+</tr>"""
+
+PORTFOLIO_ROW = """
+<tr style="border-top:1px solid #e8e4dc;">
+  <td style="padding:10px 0;font-weight:600;">{ticker}</td>
+  <td style="padding:10px 8px;color:#888;">{current} &rarr; {forecast}</td>
+  <td style="padding:10px 8px;text-align:center;color:{signal_color};font-weight:bold;">&bull; {signal}</td>
+  <td style="padding:10px 8px;text-align:right;color:{signal_color};font-weight:bold;">{change_pct}</td>
+  <td style="padding:10px 8px;text-align:right;color:#888;font-size:11px;">EV/E {ev_ebitda} &middot; ROIC {roic}</td>
+</tr>"""
+
+MOVEMENT_ROW_STYLE = "border-top:1px solid #e8e4dc;"
+MOVEMENT_CELL_STYLE = "padding:8px 6px;font-family:-apple-system,sans-serif;"
+
+SIGNAL_COLOR_MAP = {"BUY": "#1a7a1a", "SELL": "#cc2222", "HOLD": "#b8860b"}
 
 
 def run_script(name, args=None, echo_stderr=False):
@@ -40,24 +106,18 @@ def run_script(name, args=None, echo_stderr=False):
     return result.stdout.strip()
 
 
-def signal_style(label):
-    lowered = (label or "").lower()
-    for keyword, (bg, fg) in SIGNAL_COLORS.items():
-        if keyword in lowered:
-            return f"background-color:{bg};color:{fg};font-weight:bold;"
-    return ""
+def score_color(quant_score):
+    if quant_score is None:
+        return "#888"
+    if quant_score >= 80:
+        return "#00ff41"
+    if quant_score >= 60:
+        return "#888800"
+    return "#888"
 
 
-def quant_score_style(score):
-    if score is None:
-        return ""
-    if score >= 80:
-        return "background-color:#2d7a2d;color:#ffffff;font-weight:bold;"
-    if score >= 60:
-        return "background-color:#90EE90;color:#1a1a1a;font-weight:bold;"
-    if score >= 40:
-        return "background-color:#FFD700;color:#1a1a1a;font-weight:bold;"
-    return ""
+def signal_color(label):
+    return SIGNAL_COLOR_MAP.get(label, "#888")  # covers "N/A" and anything unexpected
 
 
 def fmt_pct(value, decimals=1):
@@ -70,10 +130,6 @@ def fmt_signed_pct(value, decimals=1):
 
 def fmt_num(value, decimals=1):
     return f"{value:.{decimals}f}" if value is not None else "N/A"
-
-
-def th_row(columns):
-    return "<tr>" + "".join(f"<th style='{TH_STYLE}'>{col}</th>" for col in columns) + "</tr>"
 
 
 def get_kronos_forecast(screener_forecasts, symbol):
@@ -91,67 +147,98 @@ def get_kronos_forecast(screener_forecasts, symbol):
     }
 
 
-def build_screener_table(rows, screener_forecasts):
-    header = th_row([
-        "Symbol", "Company", "Sector", "Current Price", "Forecast Price", "EV/EBITDA",
-        "Momentum 6M", "Momentum 12M", "Piotroski", "Quant Score", "Kronos Signal", "Change%",
-    ])
-    body_rows = []
+def build_screener_rows(rows, screener_forecasts):
+    html_rows = []
     for row in rows:
-        quant_score = row.get("quant_score")
         kf = get_kronos_forecast(screener_forecasts, row["symbol"])
-        body_rows.append(
-            "<tr>"
-            f"<td style='{TD_STYLE}'>{row['symbol']}</td>"
-            f"<td style='{TD_STYLE}'>{row['name']}</td>"
-            f"<td style='{TD_STYLE}'>{row['sector']}</td>"
-            f"<td style='{TD_STYLE}'>{fmt_num(kf['current_price'], 2)}</td>"
-            f"<td style='{TD_STYLE}'>{fmt_num(kf['avg_forecast'], 2)}</td>"
-            f"<td style='{TD_STYLE}'>{fmt_num(row['ev_ebitda'])}</td>"
-            f"<td style='{TD_STYLE}'>{fmt_signed_pct(row.get('momentum_6m'))}</td>"
-            f"<td style='{TD_STYLE}'>{fmt_signed_pct(row.get('momentum_12m'))}</td>"
-            f"<td style='{TD_STYLE}'>{fmt_num(row.get('piotroski'))}</td>"
-            f"<td style='{TD_STYLE}{quant_score_style(quant_score)}'>{fmt_num(quant_score)}</td>"
-            f"<td style='{TD_STYLE}{signal_style(kf['signal'])}'>{kf['signal']}</td>"
-            f"<td style='{TD_STYLE}'>{fmt_signed_pct(kf['change_pct'])}</td>"
-            "</tr>"
-        )
-    return f"<table style='{TABLE_STYLE}'>{header}{''.join(body_rows)}</table>"
+        quant_score = row.get("quant_score")
+        html_rows.append(SCREENER_ROW.format(
+            name=row["name"],
+            sector=row.get("sector") or "N/A",
+            momentum_6m=fmt_signed_pct(row.get("momentum_6m")),
+            score_color=score_color(quant_score),
+            quant_score=fmt_num(quant_score, 0),
+            ev_ebitda=fmt_num(row.get("ev_ebitda")),
+            signal_color=signal_color(kf["signal"]),
+            kronos_signal=kf["signal"],
+            change_pct=fmt_signed_pct(kf["change_pct"]),
+        ))
+    return "".join(html_rows)
 
 
-def build_portfolio_table(tickers):
-    header = th_row(["Ticker", "Current Price", "Forecast", "Change%", "Signal", "EV/EBITDA", "Valuation", "ROIC"])
-    body_rows = []
+def build_portfolio_rows(tickers):
+    html_rows = []
     for t in tickers:
-        roic_pct = t["roic"] * 100 if t["roic"] is not None else None
-        body_rows.append(
-            "<tr>"
-            f"<td style='{TD_STYLE}'>{t['ticker']}</td>"
-            f"<td style='{TD_STYLE}'>{fmt_num(t['current_price'], 2)}</td>"
-            f"<td style='{TD_STYLE}'>{fmt_num(t['avg_forecast'], 2)}</td>"
-            f"<td style='{TD_STYLE}'>{fmt_signed_pct(t['change_pct'])}</td>"
-            f"<td style='{TD_STYLE}{signal_style(t['signal'])}'>{t['signal']}</td>"
-            f"<td style='{TD_STYLE}'>{fmt_num(t['ev_ebitda'])}</td>"
-            f"<td style='{TD_STYLE}'>{t['valuation_label']}</td>"
-            f"<td style='{TD_STYLE}'>{fmt_pct(roic_pct)}</td>"
-            "</tr>"
-        )
-    return f"<table style='{TABLE_STYLE}'>{header}{''.join(body_rows)}</table>"
+        roic_pct = t["roic"] * 100 if t.get("roic") is not None else None
+        html_rows.append(PORTFOLIO_ROW.format(
+            ticker=t["ticker"],
+            current=fmt_num(t.get("current_price"), 2),
+            forecast=fmt_num(t.get("avg_forecast"), 2),
+            signal_color=signal_color(t.get("signal")),
+            signal=t.get("signal", "N/A"),
+            change_pct=fmt_signed_pct(t.get("change_pct")),
+            ev_ebitda=fmt_num(t.get("ev_ebitda")),
+            roic=fmt_pct(roic_pct),
+        ))
+    return "".join(html_rows)
 
 
-def build_daily_movement_table(dates, tickers, screener_rows, screener_forecasts):
-    header = th_row(["Ticker"] + dates)
-    body_rows = []
+def build_movement_rows(dates, tickers, screener_rows, screener_forecasts):
+    header_cells = "".join(
+        f"<td style='{MOVEMENT_CELL_STYLE}color:#888;font-size:10px;'>{d}</td>" for d in dates
+    )
+    rows_html = [
+        f"<tr style='{MOVEMENT_ROW_STYLE}'>"
+        f"<td style='{MOVEMENT_CELL_STYLE}color:#888;font-size:10px;'>Ticker</td>{header_cells}</tr>"
+    ]
     for t in tickers:
-        cells = "".join(f"<td style='{TD_STYLE}'>{fmt_num(p, 2)}</td>" for p in t["daily_prices"])
-        body_rows.append(f"<tr><td style='{TD_STYLE}'>{t['ticker']}</td>{cells}</tr>")
+        cells = "".join(f"<td style='{MOVEMENT_CELL_STYLE}text-align:right;'>{fmt_num(p, 2)}</td>" for p in t["daily_prices"])
+        rows_html.append(f"<tr style='{MOVEMENT_ROW_STYLE}'><td style='{MOVEMENT_CELL_STYLE}font-weight:600;'>{t['ticker']}</td>{cells}</tr>")
     for row in screener_rows:
         daily_prices = get_kronos_forecast(screener_forecasts, row["symbol"])["daily_prices"]
         if not daily_prices:
             continue
-        cells = "".join(f"<td style='{TD_STYLE}'>{fmt_num(p, 2)}</td>" for p in daily_prices)
-        body_rows.append(f"<tr><td style='{TD_STYLE}'>{row['symbol']}</td>{cells}</tr>")
-    return f"<table style='{TABLE_STYLE}'>{header}{''.join(body_rows)}</table>"
+        cells = "".join(f"<td style='{MOVEMENT_CELL_STYLE}text-align:right;'>{fmt_num(p, 2)}</td>" for p in daily_prices)
+        rows_html.append(f"<tr style='{MOVEMENT_ROW_STYLE}'><td style='{MOVEMENT_CELL_STYLE}font-weight:600;'>{row['symbol']}</td>{cells}</tr>")
+    return "".join(rows_html)
+
+
+def build_market_analysis(screener_rows, screener_forecasts):
+    if not screener_rows:
+        return "Ingen kandidater passerte screeningen i dag."
+
+    scores = [r["quant_score"] for r in screener_rows if r.get("quant_score") is not None]
+    avg_score = sum(scores) / len(scores) if scores else None
+
+    momentums = [r["momentum_6m"] for r in screener_rows if r.get("momentum_6m") is not None]
+    avg_momentum = sum(momentums) / len(momentums) if momentums else None
+
+    buy_count = sum(
+        1 for r in screener_rows
+        if get_kronos_forecast(screener_forecasts, r["symbol"])["signal"] == "BUY"
+    )
+
+    sectors = [r["sector"] for r in screener_rows if r.get("sector")]
+    dominant_sector = Counter(sectors).most_common(1)[0][0] if sectors else "ukjent sektor"
+
+    if avg_score is None:
+        tone = "et usikkert"
+    elif avg_score >= 65:
+        tone = "et positivt"
+    elif avg_score >= 50:
+        tone = "et blandet"
+    else:
+        tone = "et forsiktig"
+
+    score_text = f"{avg_score:.0f}" if avg_score is not None else "N/A"
+    momentum_text = f"{avg_momentum:+.1f}%" if avg_momentum is not None else "N/A"
+    buy_suffix = "er" if buy_count != 1 else ""
+
+    return (
+        f"Gjennomsnittlig quant-score blant {len(screener_rows)} kandidater er {score_text}, "
+        f"med {buy_count} Kronos-KJØP-signal{buy_suffix} konsentrert i {dominant_sector}. "
+        f"Gjennomsnittlig 6-måneders momentum ligger på {momentum_text}, {tone} bakteppe for dagen."
+    )
 
 
 def build_html_body(screener_rows, forecast_data):
@@ -160,27 +247,13 @@ def build_html_body(screener_rows, forecast_data):
     tickers = forecast_data["tickers"]
     screener_forecasts = forecast_data.get("screener_forecasts", {})
 
-    return f"""<html>
-<body style="margin:0;padding:0;background-color:#ffffff;font-family:Arial,Helvetica,sans-serif;color:#1a1a1a;">
-  <div style="max-width:900px;margin:0 auto;">
-    <div style="background-color:#1a1a2e;color:#ffffff;padding:24px 28px;">
-      <h1 style="margin:0;font-size:20px;">Daily Stock Analysis</h1>
-      <div style="opacity:0.75;font-size:14px;margin-top:4px;">{today}</div>
-    </div>
-    <div style="padding:0 28px 28px;">
-      <h2 style="{H2_STYLE}">Top Nordic Candidates (Fundamental Screening)</h2>
-      {build_screener_table(screener_rows, screener_forecasts)}
-      <p style="font-size:12px;color:#666;margin-top:-14px;">{EV_EBITDA_GUIDE}</p>
-
-      <h2 style="{H2_STYLE}">Portfolio - 5-Day Forecast</h2>
-      {build_portfolio_table(tickers)}
-
-      <h2 style="{H2_STYLE}">Daily Price Movement (Predicted)</h2>
-      {build_daily_movement_table(dates, tickers, screener_rows, screener_forecasts)}
-    </div>
-  </div>
-</body>
-</html>"""
+    return EMAIL_TEMPLATE.format(
+        date=today,
+        screener_rows=build_screener_rows(screener_rows, screener_forecasts),
+        portfolio_rows=build_portfolio_rows(tickers),
+        movement_rows=build_movement_rows(dates, tickers, screener_rows, screener_forecasts),
+        market_analysis=build_market_analysis(screener_rows, screener_forecasts),
+    )
 
 
 def build_text_body(screener_rows, forecast_data):
