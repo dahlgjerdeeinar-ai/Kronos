@@ -93,16 +93,22 @@ SIGNAL_COLOR_MAP = {"BUY": "#1a7a1a", "SELL": "#cc2222", "HOLD": "#b8860b"}
 
 
 def run_script(name, args=None, echo_stderr=False):
+    """Note: does NOT use subprocess.run(check=True) -- that raises before
+    stderr can ever be inspected/printed, which is why past failures in
+    daily_forecast.py/screener.py never showed their real traceback in CI
+    logs (just an opaque CalledProcessError). Print stderr ourselves and
+    raise a clear error instead."""
     cmd = [sys.executable, str(ROOT / name)] + list(args or [])
     result = subprocess.run(
         cmd,
         capture_output=True,
         text=True,
-        check=True,
         cwd=ROOT,
     )
-    if echo_stderr and result.stderr:
+    if result.stderr and (echo_stderr or result.returncode != 0):
         print(result.stderr.rstrip("\n"))
+    if result.returncode != 0:
+        raise RuntimeError(f"{name} exited with code {result.returncode}")
     return result.stdout.strip()
 
 

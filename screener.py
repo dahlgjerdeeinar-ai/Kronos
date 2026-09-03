@@ -17,15 +17,19 @@ computed once and weighted into both categories (12% combined).
 import json
 import sqlite3
 import sys
-import urllib.request
 from pathlib import Path
 
 import numpy as np
 import pandas as pd
+import requests
 import yfinance as yf
 
 DB_URL = "https://lseffer.github.io/stock_screener/stocks.db"
 DB_PATH = Path(__file__).resolve().parent / "stocks.db"
+DOWNLOAD_USER_AGENT = (
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+    "(KHTML, like Gecko) Chrome/124.0 Safari/537.36"
+)
 
 MIN_MARKET_CAP = 50_000_000
 INITIAL_TOP_N = 20
@@ -89,6 +93,20 @@ def nth_per_isin_cte(table, date_col, alias, n):
 
 def in_clause(items):
     return "(" + ",".join("?" for _ in items) + ")"
+
+
+def download_database():
+    """urllib's default User-Agent ("Python-urllib/x.y") gets a bare 403 from
+    some static hosts/CDNs that otherwise serve the same URL fine to a
+    browser -- a common cause of a download that fails identically every
+    single time. Use requests with a browser-like UA and surface HTTP
+    errors clearly instead of letting an opaque exception propagate."""
+    try:
+        response = requests.get(DB_URL, headers={"User-Agent": DOWNLOAD_USER_AGENT}, timeout=30)
+        response.raise_for_status()
+    except requests.RequestException as e:
+        raise RuntimeError(f"Failed to download stocks.db from {DB_URL}: {e}") from e
+    DB_PATH.write_bytes(response.content)
 
 
 def safe_div(a, b):
@@ -302,7 +320,7 @@ def compute_quant_scores(df, factor_weights):
 # --------------------------------------------------------------------------
 
 def run_screener():
-    urllib.request.urlretrieve(DB_URL, DB_PATH)
+    download_database()
 
     conn = sqlite3.connect(DB_PATH)
     cur = conn.cursor()
