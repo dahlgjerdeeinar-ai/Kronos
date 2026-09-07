@@ -122,12 +122,38 @@ def safe_div(a, b):
 # Fundamentals-based factors
 # --------------------------------------------------------------------------
 
+PIOTROSKI_REQUIRED_FIELDS = [
+    "ni_latest", "ni_prior", "assets_latest", "assets_prior",
+    "cfo_latest", "liab_latest", "liab_prior",
+    "cash_latest", "cash_prior", "curr_liab_latest", "curr_liab_prior",
+    "gp_latest", "gp_prior", "revenue_latest", "revenue_prior",
+]
+
+
 def compute_piotroski(fin):
+    """Returns 0 (not None) whenever any required input is missing/None,
+    rather than computing a partial score from whatever is available --
+    an explicit choice to treat incomplete data as a worst-case Piotroski
+    score, not excluded from the factor. This changes how such stocks are
+    ranked (they now get pulled to the bottom of this factor instead of
+    having its weight redistributed to their other available factors) --
+    see the fix commit for that tradeoff."""
     try:
+        if any(fin.get(field) is None for field in PIOTROSKI_REQUIRED_FIELDS):
+            return 0
+
         roa_latest = safe_div(fin["ni_latest"], fin["assets_latest"])
         roa_prior = safe_div(fin["ni_prior"], fin["assets_prior"])
         cfo_latest = fin["cfo_latest"]
-        accrual = safe_div(fin["ni_latest"] - fin["cfo_latest"], fin["assets_latest"]) if fin["cfo_latest"] is not None else None
+
+        ni_latest = fin["ni_latest"]
+        assets_latest = fin["assets_latest"]
+        accrual = (
+            safe_div(ni_latest - cfo_latest, assets_latest)
+            if ni_latest is not None and cfo_latest is not None and assets_latest is not None
+            else None
+        )
+
         leverage_latest = safe_div(fin["liab_latest"], fin["assets_latest"])
         leverage_prior = safe_div(fin["liab_prior"], fin["assets_prior"])
         liquidity_latest = safe_div(fin["cash_latest"], fin["curr_liab_latest"])
@@ -136,24 +162,24 @@ def compute_piotroski(fin):
         margin_prior = safe_div(fin["gp_prior"], fin["revenue_prior"])
         turnover_latest = safe_div(fin["revenue_latest"], fin["assets_latest"])
         turnover_prior = safe_div(fin["revenue_prior"], fin["assets_prior"])
-    except KeyError:
-        return None
 
-    criteria = [
-        roa_latest is not None and roa_latest > 0,
-        cfo_latest is not None and cfo_latest > 0,
-        roa_latest is not None and roa_prior is not None and roa_latest > roa_prior,
-        accrual is not None and accrual < 0,
-        leverage_latest is not None and leverage_prior is not None and leverage_latest < leverage_prior,
-        liquidity_latest is not None and liquidity_prior is not None and liquidity_latest > liquidity_prior,
-        margin_latest is not None and margin_prior is not None and margin_latest > margin_prior,
-        turnover_latest is not None and turnover_prior is not None and turnover_latest > turnover_prior,
-    ]
-    known = [c for c in criteria if c is not None]
-    if len(known) < 4:  # too little data to trust an 8-criteria score
-        return None
-    points = sum(1 for c in known if c)
-    return points * (9.0 / len(known))
+        criteria = [
+            roa_latest is not None and roa_latest > 0,
+            cfo_latest is not None and cfo_latest > 0,
+            roa_latest is not None and roa_prior is not None and roa_latest > roa_prior,
+            accrual is not None and accrual < 0,
+            leverage_latest is not None and leverage_prior is not None and leverage_latest < leverage_prior,
+            liquidity_latest is not None and liquidity_prior is not None and liquidity_latest > liquidity_prior,
+            margin_latest is not None and margin_prior is not None and margin_latest > margin_prior,
+            turnover_latest is not None and turnover_prior is not None and turnover_latest > turnover_prior,
+        ]
+        known = [c for c in criteria if c is not None]
+        if len(known) < 4:  # too little data to trust an 8-criteria score
+            return 0
+        points = sum(1 for c in known if c)
+        return points * (9.0 / len(known))
+    except (KeyError, TypeError, ZeroDivisionError):
+        return 0
 
 
 def compute_fundamental_factors(fin):
