@@ -36,6 +36,23 @@ def get_valuation_label(ev_ebitda):
     return "Very expensive"
 
 
+def fetch_live_price(ticker_obj, info, fallback):
+    try:
+        last_price = ticker_obj.fast_info.get("last_price")
+        if last_price is not None:
+            return float(last_price)
+    except Exception:
+        pass
+    for key in ("currentPrice", "regularMarketPrice"):
+        try:
+            value = info.get(key)
+        except Exception:
+            value = None
+        if value is not None:
+            return float(value)
+    return fallback
+
+
 def resolve_ticker(symbol):
     for suffix in NORDIC_SUFFIXES:
         candidate = f"{symbol}{suffix}"
@@ -76,14 +93,21 @@ def forecast_ticker(predictor, ticker, future_dates):
         pred_len=5, T=1.0, top_p=0.9, sample_count=1, verbose=False,
     )
 
-    current_price = float(x_df["close"].iloc[-1])
+    ticker_obj = yf.Ticker(ticker)
+    try:
+        info = ticker_obj.info
+    except Exception:
+        info = {}
+
+    fallback_price = float(x_df["close"].iloc[-1])
+    current_price = fetch_live_price(ticker_obj, info, fallback_price)
+
     daily_prices = [float(p) for p in pred_df["close"].tolist()]
     avg_forecast = float(pred_df["close"].mean())
     change_pct = ((avg_forecast - current_price) / current_price) * 100
 
     signal = "BUY" if change_pct > 3 else ("SELL" if change_pct < -4 else "HOLD")
 
-    info = yf.Ticker(ticker).info
     ev_ebitda = info.get("enterpriseToEbitda")
     roic = info.get("returnOnEquity")  # proxy for ROIC when true ROIC isn't exposed by yfinance
     valuation_label = get_valuation_label(ev_ebitda)
