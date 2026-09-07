@@ -1,16 +1,20 @@
 import json
 import os
+import smtplib
 import subprocess
 import sys
 from collections import Counter
 from datetime import date
+from email.mime.multipart import MIMEMultipart
+from email.mime.text import MIMEText
+from email.utils import formataddr
 from pathlib import Path
-
-import requests
 
 ROOT = Path(__file__).resolve().parent
 
-BREVO_API_URL = "https://api.brevo.com/v3/smtp/email"
+BREVO_SMTP_HOST = "smtp-relay.brevo.com"
+BREVO_SMTP_PORT = 587
+BREVO_SMTP_USERNAME = "b3e1b9001@smtp-brevo.com"
 SENDER_NAME = "Stock Analysis"
 
 EMAIL_TEMPLATE = """<!DOCTYPE html>
@@ -288,22 +292,19 @@ def build_text_body(screener_rows, forecast_data):
 
 def send_email(html_body, text_body):
     email_address = os.environ["GMAIL_ADRESS"]
-    api_key = os.environ["BREVO_API"]
+    smtp_password = os.environ["BREVO_SMTP"]
 
-    payload = {
-        "sender": {"name": SENDER_NAME, "email": email_address},
-        "to": [{"email": email_address}],
-        "subject": f"Daily Stock Analysis - {date.today().isoformat()}",
-        "htmlContent": html_body,
-        "textContent": text_body,
-    }
-    headers = {
-        "api-key": api_key,
-        "Content-Type": "application/json",
-        "Accept": "application/json",
-    }
-    response = requests.post(BREVO_API_URL, headers=headers, json=payload)
-    response.raise_for_status()
+    msg = MIMEMultipart("alternative")
+    msg["Subject"] = f"Daily Stock Analysis - {date.today().isoformat()}"
+    msg["From"] = formataddr((SENDER_NAME, email_address))
+    msg["To"] = email_address
+    msg.attach(MIMEText(text_body, "plain"))
+    msg.attach(MIMEText(html_body, "html"))
+
+    with smtplib.SMTP(BREVO_SMTP_HOST, BREVO_SMTP_PORT) as server:
+        server.starttls()
+        server.login(BREVO_SMTP_USERNAME, smtp_password)
+        server.send_message(msg)
 
 
 def main():

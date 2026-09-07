@@ -15,5 +15,5 @@ jobs:
       - name: Run daily analysis and send email
         env:
           GMAIL_ADRESS: ${{ secrets.GMAIL_ADRESS }}
-          BREVO_API: ${{ secrets.BREVO_API }}
+          BREVO_SMTP: ${{ secrets.BREVO_SMTP }}
         run: python send_email.py
