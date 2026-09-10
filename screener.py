@@ -17,6 +17,7 @@ computed once and weighted into both categories (12% combined).
 import json
 import sqlite3
 import sys
+from datetime import date
 from pathlib import Path
 
 import numpy as np
@@ -26,6 +27,8 @@ import yfinance as yf
 
 DB_URL = "https://lseffer.github.io/stock_screener/stocks.db"
 DB_PATH = Path(__file__).resolve().parent / "stocks.db"
+SCREENER_HISTORY_PATH = Path(__file__).resolve().parent / "screener_history.json"
+MAX_SCREENER_HISTORY_DAYS = 3
 DOWNLOAD_USER_AGENT = (
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
     "(KHTML, like Gecko) Chrome/124.0 Safari/537.36"
@@ -59,6 +62,28 @@ FACTOR_WEIGHTS = [
     ("gross_margin_trend", "growth",     4, True),
 ]
 FACTOR_NAMES = sorted({name for name, *_ in FACTOR_WEIGHTS})
+
+
+def update_screener_history(results):
+    """Rolling 3-day tracker of the screener's own top candidates, keyed by
+    date. Written here (not from send_email.py) because this is where the
+    screener's own symbol list and quant_score actually come from -- Kronos
+    signal/forecast data for these symbols lives in forecast_history.json
+    instead (written by daily_forecast.py), keyed by symbol, so it can be
+    looked up per historical date without duplicating it here."""
+    history = []
+    if SCREENER_HISTORY_PATH.exists():
+        try:
+            history = json.loads(SCREENER_HISTORY_PATH.read_text())
+        except Exception:
+            history = []
+
+    today_str = date.today().isoformat()
+    history = [entry for entry in history if entry.get("date") != today_str]
+    candidates = [{"symbol": r["symbol"], "quant_score": r["quant_score"]} for r in results]
+    history.append({"date": today_str, "candidates": candidates})
+    history = history[-MAX_SCREENER_HISTORY_DAYS:]
+    SCREENER_HISTORY_PATH.write_text(json.dumps(history))
 
 
 def get_recommendation(quant_score):
@@ -610,6 +635,7 @@ def run_screener():
             "quant_score": quant_score,
             "recommendation": recommendation,
         })
+    update_screener_history(results)
     return results
 
 

@@ -174,6 +174,25 @@ def fetch_actual_closes(ticker, days=5):
     return {ts.strftime("%Y-%m-%d"): float(close) for ts, close in zip(hist.index, hist["Close"]) if pd.notna(close)}
 
 
+def record_forecast_snapshot(history, key, result, dates, snapshot_date):
+    """Appends one day's forecast under `key` (a portfolio ticker like
+    "STB.OL" or a bare screener symbol like "FLUG-B"). Stores the 5 future
+    dates + predicted prices and the signal (per spec), plus change_pct and
+    current_price -- the Kronos baseline for that day -- so a later lookup
+    by symbol+date can render a forecast-vs-actual comparison without
+    needing to recompute or re-fetch anything."""
+    snapshot = {
+        "snapshot_date": snapshot_date,
+        "dates": dates,
+        "daily_prices": result["daily_prices"],
+        "signal": result["signal"],
+        "change_pct": result["change_pct"],
+        "current_price": result["current_price"],
+    }
+    history.setdefault(key, []).append(snapshot)
+    history[key] = history[key][-MAX_HISTORY_SNAPSHOTS:]
+
+
 def compute_mape(ticker, history, actual_closes):
     """Matches each past snapshot's predicted (date, price) pairs against
     actual closes that have since materialized. Returns None if no past
@@ -204,27 +223,6 @@ def run_forecast(screener_symbols=None):
         if result is not None:
             results.append(result)
 
-    # Kronos accuracy diagnostic: compare each portfolio ticker's past
-    # forecasts against the actual closes that have since happened, then
-    # record today's forecast for future comparisons. Does not touch the
-    # model itself -- purely a bookkeeping/reporting pass over its outputs.
-    forecast_history = load_forecast_history()
-    for result in results:
-        ticker = result["ticker"]
-        actual_closes = fetch_actual_closes(ticker)
-        mape = compute_mape(ticker, forecast_history, actual_closes)
-        result["mape"] = mape
-        result["mape_warning"] = mape is not None and mape > 5
-
-        snapshot = {
-            "snapshot_date": datetime.today().strftime("%Y-%m-%d"),
-            "dates": dates,
-            "daily_prices": result["daily_prices"],
-        }
-        forecast_history.setdefault(ticker, []).append(snapshot)
-        forecast_history[ticker] = forecast_history[ticker][-MAX_HISTORY_SNAPSHOTS:]
-    save_forecast_history(forecast_history)
-
     screener_forecasts = {}
     for symbol in screener_symbols or []:
         try:
@@ -232,6 +230,31 @@ def run_forecast(screener_symbols=None):
             screener_forecasts[symbol] = forecast_ticker(predictor, resolved, future_dates) if resolved else None
         except Exception:
             screener_forecasts[symbol] = None
+
+    # Kronos accuracy diagnostic + history recording. Portfolio tickers get
+    # a MAPE comparison against their own past forecasts (surfaced in the
+    # "Kronos noyaktighet" email section). Screener candidates are recorded
+    # too (keyed by screener symbol, not the resolved yahoo ticker) so
+    # send_email.py's "Gjentatte screende aksjer" section can look up what
+    # Kronos said about a repeated symbol on each historical date without
+    # needing a second network round-trip. Neither touches the model itself
+    # -- purely a bookkeeping/reporting pass over its outputs.
+    forecast_history = load_forecast_history()
+    today_str = datetime.today().strftime("%Y-%m-%d")
+
+    for result in results:
+        ticker = result["ticker"]
+        actual_closes = fetch_actual_closes(ticker)
+        mape = compute_mape(ticker, forecast_history, actual_closes)
+        result["mape"] = mape
+        result["mape_warning"] = mape is not None and mape > 5
+        record_forecast_snapshot(forecast_history, ticker, result, dates, today_str)
+
+    for symbol, result in screener_forecasts.items():
+        if result is not None:
+            record_forecast_snapshot(forecast_history, symbol, result, dates, today_str)
+
+    save_forecast_history(forecast_history)
 
     return {"dates": dates, "tickers": results, "screener_forecasts": screener_forecasts}
 

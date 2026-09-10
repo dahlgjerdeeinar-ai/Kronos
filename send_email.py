@@ -16,7 +16,7 @@ import yfinance as yf
 ROOT = Path(__file__).resolve().parent
 
 SCREENER_HISTORY_PATH = ROOT / "screener_history.json"
-MAX_SCREENER_HISTORY_DAYS = 3
+FORECAST_HISTORY_PATH = ROOT / "forecast_history.json"
 
 BREVO_SMTP_HOST = "smtp-relay.brevo.com"
 BREVO_SMTP_PORT = 587
@@ -270,6 +270,9 @@ def build_accuracy_section(tickers):
 # --------------------------------------------------------------------------
 
 def load_screener_history():
+    """screener_history.json is written by screener.py itself (it owns the
+    symbol list + quant_score), not here -- by the time this subprocess
+    call returns in main(), the file is already on disk."""
     if not SCREENER_HISTORY_PATH.exists():
         return []
     try:
@@ -278,34 +281,17 @@ def load_screener_history():
         return []
 
 
-def update_screener_history(screener_rows, screener_forecasts):
-    """Written here (not screener.py) because screener.py runs before
-    daily_forecast.py and has no access to Kronos signals/forecasts --
-    send_email.py is the first point in the pipeline where both screener
-    and Kronos data exist together. Schema matches the requested
-    {date, candidates:[{symbol, quant_score, kronos_signal, change_pct}]}
-    format, extended with current_price (the Kronos baseline price) so the
-    "Gjentatte screende aksjer" section can later verify it against an
-    actual close."""
-    history = load_screener_history()
-    today_str = date.today().isoformat()
-    history = [entry for entry in history if entry.get("date") != today_str]
-
-    candidates = []
-    for row in screener_rows:
-        kf = get_kronos_forecast(screener_forecasts, row["symbol"])
-        candidates.append({
-            "symbol": row["symbol"],
-            "quant_score": row.get("quant_score"),
-            "kronos_signal": kf["signal"],
-            "change_pct": kf["change_pct"],
-            "current_price": kf["current_price"],
-        })
-
-    history.append({"date": today_str, "candidates": candidates})
-    history = history[-MAX_SCREENER_HISTORY_DAYS:]
-    SCREENER_HISTORY_PATH.write_text(json.dumps(history))
-    return history
+def load_forecast_history():
+    """forecast_history.json is written by daily_forecast.py, keyed by
+    portfolio ticker AND by bare screener symbol (see record_forecast_snapshot
+    there) -- read here to look up what Kronos said about a repeated
+    screener symbol on each historical date."""
+    if not FORECAST_HISTORY_PATH.exists():
+        return {}
+    try:
+        return json.loads(FORECAST_HISTORY_PATH.read_text())
+    except Exception:
+        return {}
 
 
 def find_repeated_symbols(history):
@@ -350,8 +336,22 @@ def diff_color(diff_pct):
     return "#cc2222"
 
 
-def build_repeated_section(history, screener_forecasts):
-    repeated = find_repeated_symbols(history)
+def find_forecast_snapshot(forecast_history, symbol, snapshot_date):
+    for snap in forecast_history.get(symbol, []):
+        if snap.get("snapshot_date") == snapshot_date:
+            return snap
+    return None
+
+
+def build_repeated_section(screener_history, forecast_history, screener_forecasts):
+    """Screener-only by construction: repeated symbols come from
+    screener_history.json (screener.py's own candidate list), and the
+    Kronos signal/forecast/baseline shown for each historical date are
+    looked up from forecast_history.json under that same screener symbol
+    (never a portfolio ticker) for that exact date -- so a symbol's row
+    always reflects what Kronos actually said about it on that day, not
+    today's run bleeding backwards onto older rows."""
+    repeated = find_repeated_symbols(screener_history)
     if not repeated:
         return ""
 
@@ -360,21 +360,27 @@ def build_repeated_section(history, screener_forecasts):
         yahoo_ticker = resolve_yahoo_ticker(symbol, screener_forecasts)
         actual_closes = fetch_recent_closes(yahoo_ticker) if yahoo_ticker else {}
         rows_html.append(REPEATED_SYMBOL_HEADER.format(symbol=symbol))
-        for entry in history:
+        for entry in screener_history:
             match = next((c for c in entry.get("candidates", []) if c["symbol"] == symbol), None)
             if match is None:
                 continue
-            actual_close = actual_closes.get(entry["date"])
-            current_price = match.get("current_price")
+            entry_date = entry["date"]
+            snap = find_forecast_snapshot(forecast_history, symbol, entry_date) or {}
+            kronos_signal = snap.get("signal")
+            forecast_pct = snap.get("change_pct")
+            baseline_price = snap.get("current_price")
+
+            actual_close = actual_closes.get(entry_date)
             diff_pct = None
-            if actual_close is not None and current_price is not None and actual_close:
-                diff_pct = abs(current_price - actual_close) / actual_close * 100.0
+            if actual_close is not None and baseline_price is not None and actual_close:
+                diff_pct = abs(baseline_price - actual_close) / actual_close * 100.0
+
             rows_html.append(REPEATED_ROW.format(
-                date=entry["date"],
+                date=entry_date,
                 quant_score=fmt_num(match.get("quant_score"), 0),
-                signal_color=signal_color(match.get("kronos_signal")),
-                kronos_signal=match.get("kronos_signal") or "N/A",
-                forecast_pct=fmt_signed_pct(match.get("change_pct")),
+                signal_color=signal_color(kronos_signal),
+                kronos_signal=kronos_signal or "N/A",
+                forecast_pct=fmt_signed_pct(forecast_pct),
                 actual_close=fmt_num(actual_close, 2),
                 diff_color=diff_color(diff_pct),
                 diff_pct=fmt_pct(diff_pct),
@@ -441,7 +447,7 @@ def build_market_analysis(screener_rows, screener_forecasts):
     )
 
 
-def build_html_body(screener_rows, forecast_data, screener_history):
+def build_html_body(screener_rows, forecast_data, screener_history, forecast_history):
     today = date.today().isoformat()
     dates = forecast_data["dates"]
     tickers = forecast_data["tickers"]
@@ -451,7 +457,7 @@ def build_html_body(screener_rows, forecast_data, screener_history):
     return EMAIL_TEMPLATE.format(
         date=today,
         screener_rows=build_screener_rows(screener_rows, screener_forecasts),
-        repeated_section=build_repeated_section(screener_history, screener_forecasts),
+        repeated_section=build_repeated_section(screener_history, forecast_history, screener_forecasts),
         portfolio_rows=build_portfolio_rows(tickers),
         movement_rows=build_movement_rows(dates, tickers, screener_rows, screener_forecasts),
         accuracy_rows=accuracy_rows,
@@ -511,11 +517,11 @@ def main():
     screener_rows = json.loads(run_script("screener.py", echo_stderr=True))
     screener_symbols = [row["symbol"] for row in screener_rows]
     forecast_data = json.loads(run_script("daily_forecast.py", screener_symbols))
-    screener_forecasts = forecast_data.get("screener_forecasts", {})
 
-    screener_history = update_screener_history(screener_rows, screener_forecasts)
+    screener_history = load_screener_history()
+    forecast_history = load_forecast_history()
 
-    html_body = build_html_body(screener_rows, forecast_data, screener_history)
+    html_body = build_html_body(screener_rows, forecast_data, screener_history, forecast_history)
     text_body = build_text_body(screener_rows, forecast_data)
 
     print(text_body)
