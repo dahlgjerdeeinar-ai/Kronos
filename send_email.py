@@ -10,7 +10,13 @@ from email.mime.text import MIMEText
 from email.utils import formataddr
 from pathlib import Path
 
+import pandas as pd
+import yfinance as yf
+
 ROOT = Path(__file__).resolve().parent
+
+SCREENER_HISTORY_PATH = ROOT / "screener_history.json"
+MAX_SCREENER_HISTORY_DAYS = 3
 
 BREVO_SMTP_HOST = "smtp-relay.brevo.com"
 BREVO_SMTP_PORT = 587
@@ -46,6 +52,8 @@ EMAIL_TEMPLATE = """<!DOCTYPE html>
       {screener_rows}
     </table>
 
+    {repeated_section}
+
     <div style="font-family:-apple-system,sans-serif;font-size:10px;color:#555;letter-spacing:2px;text-transform:uppercase;margin:24px 0 14px;border-bottom:1px solid #222;padding-bottom:6px;">Portefølje · 5-dagers prognose</div>
     <table style="width:100%;font-size:13px;border-collapse:collapse;font-family:-apple-system,sans-serif;">
       {portfolio_rows}
@@ -55,6 +63,12 @@ EMAIL_TEMPLATE = """<!DOCTYPE html>
     <table style="width:100%;font-size:12px;border-collapse:collapse;font-family:-apple-system,sans-serif;">
       {movement_rows}
     </table>
+
+    <div style="font-family:-apple-system,sans-serif;font-size:10px;color:#555;letter-spacing:2px;text-transform:uppercase;margin:24px 0 14px;border-bottom:1px solid #222;padding-bottom:6px;">Kronos nøyaktighet (siste dager)</div>
+    <table style="width:100%;font-size:13px;border-collapse:collapse;font-family:-apple-system,sans-serif;">
+      {accuracy_rows}
+    </table>
+    {accuracy_warning}
 
     <div style="margin-top:24px;background:#f0ede6;border-left:3px solid #0a0f0a;padding:14px 16px;border-radius:0 4px 4px 0;">
       <div style="font-family:-apple-system,sans-serif;font-size:10px;color:#555;letter-spacing:2px;text-transform:uppercase;margin-bottom:8px;">Markedsanalyse</div>
@@ -84,7 +98,9 @@ SCREENER_ROW = """
 PORTFOLIO_ROW = """
 <tr style="border-top:1px solid #e8e4dc;">
   <td style="padding:10px 0;font-weight:600;">{ticker}</td>
-  <td style="padding:10px 8px;color:#888;">{current} &rarr; {forecast}</td>
+  <td style="padding:10px 8px;color:#888;">{current} &rarr; {forecast}
+    <br><span style="font-size:10px;color:#aaa;">Yesterday close (Kronos baseline): {current} | Today open: {today_open} | Gap: {gap_pct}</span>
+  </td>
   <td style="padding:10px 8px;text-align:center;color:{signal_color};font-weight:bold;">&bull; {signal}</td>
   <td style="padding:10px 8px;text-align:right;color:{signal_color};font-weight:bold;">{change_pct}</td>
   <td style="padding:10px 8px;text-align:right;color:#888;font-size:11px;">EV/E {ev_ebitda} &middot; ROIC {roic}</td>
@@ -94,6 +110,46 @@ MOVEMENT_ROW_STYLE = "border-top:1px solid #e8e4dc;"
 MOVEMENT_CELL_STYLE = "padding:8px 6px;font-family:-apple-system,sans-serif;"
 
 SIGNAL_COLOR_MAP = {"BUY": "#1a7a1a", "SELL": "#cc2222", "HOLD": "#b8860b"}
+
+REPEATED_SECTION_WRAPPER = """
+<div style="font-family:-apple-system,sans-serif;font-size:10px;color:#555;letter-spacing:2px;text-transform:uppercase;margin:24px 0 14px;border-bottom:1px solid #222;padding-bottom:6px;">Gjentatte screende aksjer</div>
+<table style="width:100%;font-size:12px;border-collapse:collapse;">
+  <tr style="font-size:10px;color:#888;font-family:-apple-system,sans-serif;">
+    <td style="padding:4px 6px;">Dato</td>
+    <td style="padding:4px 6px;text-align:center;">Score</td>
+    <td style="padding:4px 6px;text-align:center;">Kronos</td>
+    <td style="padding:4px 6px;text-align:right;">Kronos %</td>
+    <td style="padding:4px 6px;text-align:right;">Faktisk</td>
+    <td style="padding:4px 6px;text-align:right;">Avvik</td>
+  </tr>
+  {rows}
+</table>"""
+
+REPEATED_SYMBOL_HEADER = """
+<tr>
+  <td colspan="6" style="padding:14px 6px 4px;font-family:Georgia,serif;font-size:13px;font-weight:bold;color:#0a0f0a;">{symbol}</td>
+</tr>"""
+
+REPEATED_ROW = """
+<tr style="border-top:1px solid #e8e4dc;">
+  <td style="padding:8px 6px;font-family:-apple-system,sans-serif;">{date}</td>
+  <td style="padding:8px 6px;text-align:center;font-family:-apple-system,sans-serif;">{quant_score}</td>
+  <td style="padding:8px 6px;text-align:center;color:{signal_color};font-weight:bold;font-family:-apple-system,sans-serif;">{kronos_signal}</td>
+  <td style="padding:8px 6px;text-align:right;font-family:-apple-system,sans-serif;">{forecast_pct}</td>
+  <td style="padding:8px 6px;text-align:right;font-family:-apple-system,sans-serif;">{actual_close}</td>
+  <td style="padding:8px 6px;text-align:right;color:{diff_color};font-weight:bold;font-family:-apple-system,sans-serif;">{diff_pct}</td>
+</tr>"""
+
+ACCURACY_ROW = """
+<tr style="border-top:1px solid #e8e4dc;">
+  <td style="padding:8px 0;font-weight:600;">{ticker}</td>
+  <td style="padding:8px 8px;text-align:right;">{mape}</td>
+</tr>"""
+
+ACCURACY_WARNING = """
+<div style="margin-top:10px;background:#fff8e1;border-left:3px solid #b8860b;padding:10px 14px;border-radius:0 4px 4px 0;font-family:-apple-system,sans-serif;font-size:12px;color:#7a5c00;">
+  Kronos spår fra historiske sluttkurser. Store avvik kan skyldes gap ved børsåpning eller nyheter over natten.
+</div>"""
 
 
 def run_script(name, args=None, echo_stderr=False):
@@ -184,6 +240,8 @@ def build_portfolio_rows(tickers):
             ticker=t["ticker"],
             current=fmt_num(t.get("current_price"), 2),
             forecast=fmt_num(t.get("avg_forecast"), 2),
+            today_open=fmt_num(t.get("today_open"), 2),
+            gap_pct=fmt_signed_pct(t.get("gap_pct")),
             signal_color=signal_color(t.get("signal")),
             signal=t.get("signal", "N/A"),
             change_pct=fmt_signed_pct(t.get("change_pct")),
@@ -191,6 +249,138 @@ def build_portfolio_rows(tickers):
             roic=fmt_pct(roic_pct),
         ))
     return "".join(html_rows)
+
+
+def build_accuracy_section(tickers):
+    rows_html = []
+    any_warning = False
+    for t in tickers:
+        mape = t.get("mape")
+        rows_html.append(ACCURACY_ROW.format(
+            ticker=t["ticker"],
+            mape=fmt_pct(mape) if mape is not None else "N/A (ingen historikk enda)",
+        ))
+        if t.get("mape_warning"):
+            any_warning = True
+    return "".join(rows_html), (ACCURACY_WARNING if any_warning else "")
+
+
+# --------------------------------------------------------------------------
+# Repeated screener candidates: rolling 3-day history tracker
+# --------------------------------------------------------------------------
+
+def load_screener_history():
+    if not SCREENER_HISTORY_PATH.exists():
+        return []
+    try:
+        return json.loads(SCREENER_HISTORY_PATH.read_text())
+    except Exception:
+        return []
+
+
+def update_screener_history(screener_rows, screener_forecasts):
+    """Written here (not screener.py) because screener.py runs before
+    daily_forecast.py and has no access to Kronos signals/forecasts --
+    send_email.py is the first point in the pipeline where both screener
+    and Kronos data exist together. Schema matches the requested
+    {date, candidates:[{symbol, quant_score, kronos_signal, change_pct}]}
+    format, extended with current_price (the Kronos baseline price) so the
+    "Gjentatte screende aksjer" section can later verify it against an
+    actual close."""
+    history = load_screener_history()
+    today_str = date.today().isoformat()
+    history = [entry for entry in history if entry.get("date") != today_str]
+
+    candidates = []
+    for row in screener_rows:
+        kf = get_kronos_forecast(screener_forecasts, row["symbol"])
+        candidates.append({
+            "symbol": row["symbol"],
+            "quant_score": row.get("quant_score"),
+            "kronos_signal": kf["signal"],
+            "change_pct": kf["change_pct"],
+            "current_price": kf["current_price"],
+        })
+
+    history.append({"date": today_str, "candidates": candidates})
+    history = history[-MAX_SCREENER_HISTORY_DAYS:]
+    SCREENER_HISTORY_PATH.write_text(json.dumps(history))
+    return history
+
+
+def find_repeated_symbols(history):
+    counts = Counter()
+    for entry in history:
+        counts.update({c["symbol"] for c in entry.get("candidates", [])})
+    return {symbol for symbol, n in counts.items() if n >= 2}
+
+
+def resolve_yahoo_ticker(symbol, screener_forecasts):
+    forecast = screener_forecasts.get(symbol) or {}
+    ticker = forecast.get("ticker")
+    if ticker:
+        return ticker
+    try:
+        import daily_forecast  # heavy (loads Kronos model code) -- only import when the fallback is actually needed
+        return daily_forecast.resolve_ticker(symbol)
+    except Exception:
+        return None
+
+
+def fetch_recent_closes(ticker, days=3):
+    try:
+        hist = yf.download(ticker, period="10d", interval="1d", auto_adjust=True, progress=False)
+    except Exception:
+        return {}
+    if hist.empty:
+        return {}
+    if hasattr(hist.columns, "get_level_values") and hist.columns.nlevels > 1:
+        hist.columns = hist.columns.get_level_values(0)
+    hist = hist.tail(days)
+    return {ts.strftime("%Y-%m-%d"): float(c) for ts, c in zip(hist.index, hist["Close"]) if pd.notna(c)}
+
+
+def diff_color(diff_pct):
+    if diff_pct is None:
+        return "#888"
+    if diff_pct <= 2:
+        return "#1a7a1a"
+    if diff_pct <= 5:
+        return "#b8860b"
+    return "#cc2222"
+
+
+def build_repeated_section(history, screener_forecasts):
+    repeated = find_repeated_symbols(history)
+    if not repeated:
+        return ""
+
+    rows_html = []
+    for symbol in sorted(repeated):
+        yahoo_ticker = resolve_yahoo_ticker(symbol, screener_forecasts)
+        actual_closes = fetch_recent_closes(yahoo_ticker) if yahoo_ticker else {}
+        rows_html.append(REPEATED_SYMBOL_HEADER.format(symbol=symbol))
+        for entry in history:
+            match = next((c for c in entry.get("candidates", []) if c["symbol"] == symbol), None)
+            if match is None:
+                continue
+            actual_close = actual_closes.get(entry["date"])
+            current_price = match.get("current_price")
+            diff_pct = None
+            if actual_close is not None and current_price is not None and actual_close:
+                diff_pct = abs(current_price - actual_close) / actual_close * 100.0
+            rows_html.append(REPEATED_ROW.format(
+                date=entry["date"],
+                quant_score=fmt_num(match.get("quant_score"), 0),
+                signal_color=signal_color(match.get("kronos_signal")),
+                kronos_signal=match.get("kronos_signal") or "N/A",
+                forecast_pct=fmt_signed_pct(match.get("change_pct")),
+                actual_close=fmt_num(actual_close, 2),
+                diff_color=diff_color(diff_pct),
+                diff_pct=fmt_pct(diff_pct),
+            ))
+
+    return REPEATED_SECTION_WRAPPER.format(rows="".join(rows_html))
 
 
 def build_movement_rows(dates, tickers, screener_rows, screener_forecasts):
@@ -251,17 +441,21 @@ def build_market_analysis(screener_rows, screener_forecasts):
     )
 
 
-def build_html_body(screener_rows, forecast_data):
+def build_html_body(screener_rows, forecast_data, screener_history):
     today = date.today().isoformat()
     dates = forecast_data["dates"]
     tickers = forecast_data["tickers"]
     screener_forecasts = forecast_data.get("screener_forecasts", {})
+    accuracy_rows, accuracy_warning = build_accuracy_section(tickers)
 
     return EMAIL_TEMPLATE.format(
         date=today,
         screener_rows=build_screener_rows(screener_rows, screener_forecasts),
+        repeated_section=build_repeated_section(screener_history, screener_forecasts),
         portfolio_rows=build_portfolio_rows(tickers),
         movement_rows=build_movement_rows(dates, tickers, screener_rows, screener_forecasts),
+        accuracy_rows=accuracy_rows,
+        accuracy_warning=accuracy_warning,
         market_analysis=build_market_analysis(screener_rows, screener_forecasts),
     )
 
@@ -282,10 +476,16 @@ def build_text_body(screener_rows, forecast_data):
     lines += ["", "PORTFOLIO - 5-DAY FORECAST"]
     for t in forecast_data["tickers"]:
         roic_pct = t["roic"] * 100 if t["roic"] is not None else None
+        mape = t.get("mape")
         lines.append(
             f"{t['ticker']}: {fmt_num(t['current_price'], 2)} -> {fmt_num(t['avg_forecast'], 2)} "
             f"({fmt_signed_pct(t['change_pct'])}) | {t['signal']} | EV/EBITDA: {fmt_num(t['ev_ebitda'])} "
             f"({t['valuation_label']}) | ROIC: {fmt_pct(roic_pct)}"
+        )
+        lines.append(
+            f"    Yesterday close (Kronos baseline): {fmt_num(t.get('current_price'), 2)} | "
+            f"Today open: {fmt_num(t.get('today_open'), 2)} | Gap: {fmt_signed_pct(t.get('gap_pct'))} | "
+            f"MAPE: {fmt_pct(mape) if mape is not None else 'N/A'}"
         )
     return "\n".join(lines)
 
@@ -311,8 +511,11 @@ def main():
     screener_rows = json.loads(run_script("screener.py", echo_stderr=True))
     screener_symbols = [row["symbol"] for row in screener_rows]
     forecast_data = json.loads(run_script("daily_forecast.py", screener_symbols))
+    screener_forecasts = forecast_data.get("screener_forecasts", {})
 
-    html_body = build_html_body(screener_rows, forecast_data)
+    screener_history = update_screener_history(screener_rows, screener_forecasts)
+
+    html_body = build_html_body(screener_rows, forecast_data, screener_history)
     text_body = build_text_body(screener_rows, forecast_data)
 
     print(text_body)

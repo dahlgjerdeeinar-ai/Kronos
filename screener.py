@@ -31,7 +31,7 @@ DOWNLOAD_USER_AGENT = (
     "(KHTML, like Gecko) Chrome/124.0 Safari/537.36"
 )
 
-MIN_MARKET_CAP = 50_000_000
+MIN_MARKET_CAP = 30_000_000
 INITIAL_TOP_N = 20
 FINAL_TOP_N = 10
 MIN_VALID_FACTORS = 6
@@ -552,11 +552,6 @@ def run_screener():
         records.append(record)
 
     df = pd.DataFrame(records)
-
-    # ---- pre-filter: 6M momentum > 0 (needs the price-history pull above) ----
-    before = len(df)
-    df = df[df["momentum_6m"] > 0].reset_index(drop=True)
-    print(f"[screener] pass 6M momentum > 0: {len(df)} (of {before} with price history joined)", file=sys.stderr)
 
     if df.empty:
         return []
