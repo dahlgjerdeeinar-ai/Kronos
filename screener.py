@@ -40,6 +40,17 @@ INITIAL_TOP_N = 20
 FINAL_TOP_N = 10
 MIN_VALID_FACTORS = 6
 
+# Kronos compatibility: stocks too thin to forecast reliably are excluded
+# before Kronos ever sees them. Norwegian/Danish (.OL/.CO) small caps
+# naturally trade less than the default bar allows for, so Swedish (.ST)
+# gets a lower volume floor -- see kronos_volume_threshold().
+KRONOS_MIN_VOLUME = 50_000
+KRONOS_MIN_VOLUME_ST = 30_000
+KRONOS_MIN_VOLUME_RELAXED = 20_000
+KRONOS_MIN_VOLATILITY_PCT = 0.3
+KRONOS_MAX_VOLATILITY_PCT = 3.0
+KRONOS_MIN_COMPATIBLE_COUNT = 5
+
 OSEBX_TICKER = "^OSEBX"
 
 DATE_COLUMN_CANDIDATES = ["market_date", "trade_date", "dw_modified", "report_date", "period_end_date", "fiscal_date", "date"]
@@ -334,6 +345,78 @@ def fetch_sector(yahoo_ticker, db_sector):
     return db_sector, "lseffer DB (possibly empty)"
 
 
+def kronos_volume_threshold(yahoo_ticker):
+    if yahoo_ticker and yahoo_ticker.endswith(".ST"):
+        return KRONOS_MIN_VOLUME_ST
+    return KRONOS_MIN_VOLUME
+
+
+def check_kronos_compatibility(yahoo_ticker, volume_threshold):
+    """Fetches ~2 months of daily bars and checks the two things
+    "Om systemet" already advertises to readers: average daily volume above
+    `volume_threshold`, and daily close-to-close volatility (stdev of pct
+    change, as a %) within [KRONOS_MIN_VOLATILITY_PCT, KRONOS_MAX_VOLATILITY_PCT].
+    Returns a dict with every intermediate value (not just the final bool)
+    so callers can print a real debug line instead of an opaque True/False.
+
+    If there's no yahoo_ticker to check, or the yfinance call fails/returns
+    nothing, this does NOT exclude the stock -- there's no way to verify
+    incompatibility, and daily_forecast.py resolves its own ticker
+    independently anyway, so a missing DB column here shouldn't silently
+    drop an otherwise-fine candidate."""
+    result = {
+        "yahoo_ticker": yahoo_ticker,
+        "volume_threshold": volume_threshold,
+        "avg_volume": None,
+        "volatility_pct": None,
+        "passes_volume": False,
+        "passes_volatility": False,
+        "compatible": False,
+    }
+    if not yahoo_ticker:
+        result["compatible"] = True
+        return result
+
+    try:
+        hist = yf.download(yahoo_ticker, period="2mo", interval="1d", auto_adjust=True, progress=False)
+    except Exception:
+        result["compatible"] = True
+        return result
+    if isinstance(hist.columns, pd.MultiIndex):
+        hist.columns = hist.columns.get_level_values(0)
+    if hist.empty or "Volume" not in hist.columns or "Close" not in hist.columns:
+        result["compatible"] = True
+        return result
+
+    avg_volume = hist["Volume"].tail(30).mean()
+    daily_returns = hist["Close"].pct_change().dropna().tail(30)
+    volatility_pct = float(daily_returns.std() * 100) if not daily_returns.empty else None
+
+    result["avg_volume"] = float(avg_volume) if pd.notna(avg_volume) else None
+    result["volatility_pct"] = volatility_pct
+    result["passes_volume"] = result["avg_volume"] is not None and result["avg_volume"] >= volume_threshold
+    result["passes_volatility"] = (
+        volatility_pct is not None
+        and KRONOS_MIN_VOLATILITY_PCT <= volatility_pct <= KRONOS_MAX_VOLATILITY_PCT
+    )
+    result["compatible"] = result["passes_volume"] and result["passes_volatility"]
+    return result
+
+
+def print_compatibility_line(symbol, compat):
+    avg_vol_str = f"{compat['avg_volume']:.0f}" if compat["avg_volume"] is not None else "N/A"
+    vola_str = f"{compat['volatility_pct']:.2f}%" if compat["volatility_pct"] is not None else "N/A"
+    print(
+        f"[screener] KRONOS COMPAT {symbol} ({compat['yahoo_ticker'] or 'no yahoo_ticker'}): "
+        f"avg_volume={avg_vol_str} (threshold={compat['volume_threshold']}) "
+        f"passes_volume={compat['passes_volume']} | "
+        f"volatility={vola_str} (range={KRONOS_MIN_VOLATILITY_PCT}-{KRONOS_MAX_VOLATILITY_PCT}%) "
+        f"passes_volatility={compat['passes_volatility']} | "
+        f"compatible={compat['compatible']}",
+        file=sys.stderr,
+    )
+
+
 def fetch_osebx_history():
     try:
         df = yf.download(OSEBX_TICKER, period="14mo", interval="1d", auto_adjust=True, progress=False)
@@ -622,6 +705,7 @@ def run_screener():
     # ---- enrich top 20 with yfinance: debt/equity + beta/ivol vs OSEBX + sector fallback ----
     osebx_hist = fetch_osebx_history()
     sector_source_counts = Counter()
+    compatibility = {}
     for idx, row in top20.iterrows():
         top20.at[idx, "debt_equity"] = fetch_debt_equity(row["yahoo_ticker"])
         stock_hist = ph_by_isin.get(row["isin"], pd.DataFrame(columns=["date", "close"]))
@@ -633,16 +717,42 @@ def run_screener():
         top20.at[idx, "sector"] = sector
         sector_source_counts[source] += 1
 
+        threshold = kronos_volume_threshold(row["yahoo_ticker"])
+        compat = check_kronos_compatibility(row["yahoo_ticker"], threshold)
+        compatibility[row["isin"]] = compat
+        print_compatibility_line(row["symbol"], compat)
+
     print("[screener] sector source breakdown among top-20 candidates:", file=sys.stderr)
     for source, count in sector_source_counts.most_common():
         print(f"[screener]   {source}: {count}", file=sys.stderr)
+
+    # ---- Kronos compatibility: hard exclusion, not just a flag ----
+    compatible_count = sum(1 for c in compatibility.values() if c["compatible"])
+    if compatible_count < KRONOS_MIN_COMPATIBLE_COUNT:
+        print(
+            f"[screener] WARNING: only {compatible_count}/{len(top20)} top-20 candidates are "
+            f"Kronos-compatible (< {KRONOS_MIN_COMPATIBLE_COUNT}) -- relaxing volume threshold "
+            f"to {KRONOS_MIN_VOLUME_RELAXED} and rechecking",
+            file=sys.stderr,
+        )
+        for idx, row in top20.iterrows():
+            compat = check_kronos_compatibility(row["yahoo_ticker"], KRONOS_MIN_VOLUME_RELAXED)
+            compatibility[row["isin"]] = compat
+            print_compatibility_line(row["symbol"], compat)
+        compatible_count = sum(1 for c in compatibility.values() if c["compatible"])
+
+    incompatible_symbols = [row["symbol"] for _, row in top20.iterrows() if not compatibility[row["isin"]]["compatible"]]
+    if incompatible_symbols:
+        print(f"[screener] excluding Kronos-incompatible candidates: {incompatible_symbols}", file=sys.stderr)
+    top20 = top20[top20["isin"].map(lambda isin: compatibility[isin]["compatible"])]
+    print(f"[screener] {compatible_count} of the original top 20 passed the Kronos compatibility filter", file=sys.stderr)
 
     # ---- re-score the top 20 with all 12 factors, using percentile ranks within this subset ----
     rescored, coverage_pct = compute_quant_scores(top20, FACTOR_WEIGHTS)
     rescored = rescored[rescored["_valid_factor_count"] >= MIN_VALID_FACTORS]
     final = rescored.sort_values("quant_score", ascending=False).head(FINAL_TOP_N)
 
-    print("[screener] factor coverage among top-20 candidates:", file=sys.stderr)
+    print(f"[screener] factor coverage among the {len(top20)} Kronos-compatible candidates:", file=sys.stderr)
     for name, pct in sorted(coverage_pct.items(), key=lambda kv: kv[1]):
         print(f"[screener]   {name}: {pct:.0f}%", file=sys.stderr)
     worst5 = sorted(coverage_pct.items(), key=lambda kv: kv[1])[:5]
