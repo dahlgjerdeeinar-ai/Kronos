@@ -250,7 +250,7 @@ def build_screener_rows(rows, screener_forecasts):
         quant_score = row.get("quant_score")
         html_rows.append(SCREENER_ROW.format(
             name=row["name"],
-            sector=row.get("sector") or "N/A",
+            sector=row.get("sector") if row.get("sector") is not None else "N/A",
             momentum_6m=fmt_signed_pct(row.get("momentum_6m")),
             quant_score=fmt_num(quant_score, 0),
             ev_ebitda=fmt_num(row.get("ev_ebitda")),

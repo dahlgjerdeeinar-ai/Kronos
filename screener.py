@@ -17,6 +17,7 @@ computed once and weighted into both categories (12% combined).
 import json
 import sqlite3
 import sys
+from collections import Counter
 from datetime import date
 from pathlib import Path
 
@@ -301,6 +302,36 @@ def fetch_debt_equity(yahoo_ticker):
         return yf.Ticker(yahoo_ticker).info.get("debtToEquity")
     except Exception:
         return None
+
+
+def fetch_sector(yahoo_ticker, db_sector):
+    """Fallback chain: yfinance info.sector -> fast_info -> info.industry ->
+    the lseffer DB's own sector value (even if empty, rather than "N/A").
+    Returns (sector_value, source_label) so callers can tally where each
+    stock's sector actually came from."""
+    if yahoo_ticker:
+        try:
+            info = yf.Ticker(yahoo_ticker).info
+        except Exception:
+            info = {}
+
+        sector = info.get("sector")
+        if sector:
+            return sector, "yfinance info.sector"
+
+        try:
+            fast_info = yf.Ticker(yahoo_ticker).fast_info
+            fast_sector = fast_info.get("sector") if hasattr(fast_info, "get") else getattr(fast_info, "sector", None)
+        except Exception:
+            fast_sector = None
+        if fast_sector:
+            return fast_sector, "yfinance fast_info"
+
+        industry = info.get("industry")
+        if industry:
+            return industry, "yfinance info.industry"
+
+    return db_sector, "lseffer DB (possibly empty)"
 
 
 def fetch_osebx_history():
@@ -588,14 +619,23 @@ def run_screener():
     print(f"[screener] candidates with >= {MIN_VALID_FACTORS} of {len(FACTOR_NAMES)} factors: {len(scored)}", file=sys.stderr)
     print(f"[screener] advancing top {len(top20)} to yfinance enrichment stage", file=sys.stderr)
 
-    # ---- enrich top 20 with yfinance: debt/equity + beta/ivol vs OSEBX ----
+    # ---- enrich top 20 with yfinance: debt/equity + beta/ivol vs OSEBX + sector fallback ----
     osebx_hist = fetch_osebx_history()
+    sector_source_counts = Counter()
     for idx, row in top20.iterrows():
         top20.at[idx, "debt_equity"] = fetch_debt_equity(row["yahoo_ticker"])
         stock_hist = ph_by_isin.get(row["isin"], pd.DataFrame(columns=["date", "close"]))
         beta, ivol = compute_beta_ivol(stock_hist, osebx_hist)
         top20.at[idx, "beta"] = beta
         top20.at[idx, "ivol"] = ivol
+
+        sector, source = fetch_sector(row["yahoo_ticker"], row["sector"])
+        top20.at[idx, "sector"] = sector
+        sector_source_counts[source] += 1
+
+    print("[screener] sector source breakdown among top-20 candidates:", file=sys.stderr)
+    for source, count in sector_source_counts.most_common():
+        print(f"[screener]   {source}: {count}", file=sys.stderr)
 
     # ---- re-score the top 20 with all 12 factors, using percentile ranks within this subset ----
     rescored, coverage_pct = compute_quant_scores(top20, FACTOR_WEIGHTS)

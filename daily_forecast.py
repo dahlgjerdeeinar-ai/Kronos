@@ -182,10 +182,10 @@ def forecast_ticker(predictor, ticker, future_dates):
     today = pd.Timestamp(datetime.today().date())
     if last_date <= today:
         stale_trading_days = len(pd.bdate_range(start=last_date, end=today)) - 1
-        if stale_trading_days > 1:
+        if stale_trading_days > 3:
             print(
-                f"[daily_forecast] WARNING: {ticker} data is stale -- last available date "
-                f"{last_date.date()} is {stale_trading_days} trading days old",
+                f"[daily_forecast] WARNING: Data for {ticker} is stale — last date: "
+                f"{last_date.date()}. Forecasts may be unreliable.",
                 file=sys.stderr,
             )
 
@@ -243,6 +243,14 @@ def forecast_ticker(predictor, ticker, future_dates):
     daily_prices = [float(p) for p in daily_prices]
     avg_forecast = float(np.mean(daily_prices))
     change_pct = ((avg_forecast - current_price) / current_price) * 100
+
+    if abs(change_pct) > 10:
+        print(
+            f"[daily_forecast] DEBUG: {ticker} predicted change {change_pct:+.1f}% exceeds 10% -- "
+            f"last 3 rows of input data handed to Kronos:\n"
+            f"{recent_df[['timestamps', 'open', 'high', 'low', 'close', 'volume']].tail(3).to_string(index=False)}",
+            file=sys.stderr,
+        )
 
     signal = "BUY" if change_pct > 2 else ("SELL" if change_pct < -4 else "HOLD")
 
