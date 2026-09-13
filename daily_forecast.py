@@ -244,6 +244,17 @@ def forecast_ticker(predictor, ticker, future_dates):
     # never a separately-fetched live price -- so the forecasted % change is
     # measured from Kronos's own baseline, not a moving target.
     current_price = float(x_df["close"].iloc[-1])
+
+    if ticker.upper().startswith("BULTEN"):
+        print(
+            f"[daily_forecast] DEBUG BULTEN: resolved ticker={ticker}\n"
+            f"  baseline current_price: {current_price}\n"
+            f"  last 5 rows of input data:\n"
+            f"{recent_df[['timestamps', 'open', 'high', 'low', 'close', 'volume']].tail(5).to_string(index=False)}\n"
+            f"  individual run predictions (close, {SAMPLE_RUNS} runs x 5 days):\n{runs_array}",
+            file=sys.stderr,
+        )
+
     today_open = fetch_today_open(ticker)
     gap_pct = (
         ((today_open - current_price) / current_price) * 100
