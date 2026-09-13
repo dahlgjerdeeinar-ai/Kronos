@@ -75,6 +75,28 @@ EMAIL_TEMPLATE = """<!DOCTYPE html>
       <div style="font-size:13px;color:#333;line-height:1.8;font-style:italic;">{market_analysis}</div>
     </div>
 
+    <div style="margin-top:24px;background:#f0ede6;border-left:3px solid #0a0f0a;padding:16px 20px;">
+      <div style="font-family:-apple-system,sans-serif;font-size:10px;color:#555;letter-spacing:2px;text-transform:uppercase;margin-bottom:10px;">Om systemet</div>
+      <div style="font-family:-apple-system,sans-serif;font-size:12px;color:#444;line-height:1.8;">
+        <strong>Screening:</strong> 1400+ nordiske aksjer screenes daglig via lseffer Nordic Stock Screener.
+        Aksjer rangeres etter en 12-faktor kvant-modell: Verdi (Earnings Yield, FCF Yield, P/B),
+        Kvalitet (Piotroski F-Score, Gross Margin), Momentum (6M, 12M, 52W High),
+        Vekst (omsetningsvekst, marginforbedring) og Risiko (Beta, IVOL).<br><br>
+        <strong>Kronos:</strong> AI-modell trent på 12 milliarder kursdata-rekorder fra 45 globale børser.
+        Spår kortsiktige kursbevegelser (5 dager) basert på historiske OHLCV-mønstre.
+        Kronos er et timing-verktøy — ikke et seleksjonsverktøy.<br><br>
+        <strong>Signaler:</strong><br>
+        &#9679; BUY: Kronos spår over +2% vekst på 5 dager<br>
+        &#9679; HOLD: Kronos spår mellom -4% og +2%<br>
+        &#9679; SELL: Kronos spår under -4% fall på 5 dager<br><br>
+        <strong>Quant Score:</strong> 0-100. Strong Buy &ge;80 &middot; Buy &ge;60 &middot; Hold &ge;40 &middot; Under 40 vises ikke.<br><br>
+        <strong>Kronos-kompatibilitet:</strong> Kun aksjer med daglig volum &ge;50 000 og daglig volatilitet
+        mellom 0.3-3% anbefales for Kronos-prognoser. Makro-sensitive sektorer (Energy, Basic Materials,
+        Forsvar) er merket &#9888;&#65039; da Kronos ikke tar hensyn til geopolitiske hendelser.<br><br>
+        <em>Dette er ikke finansiell rådgivning. Alle investeringsbeslutninger tas på eget ansvar.</em>
+      </div>
+    </div>
+
   </div>
 
   <div style="background:#0a0f0a;padding:12px 28px;font-family:-apple-system,sans-serif;font-size:10px;color:#444;display:flex;justify-content:space-between;">
@@ -106,8 +128,33 @@ PORTFOLIO_ROW = """
   <td style="padding:10px 8px;text-align:right;color:#888;font-size:11px;">EV/E {ev_ebitda} &middot; ROIC {roic}</td>
 </tr>"""
 
-MOVEMENT_ROW_STYLE = "border-top:1px solid #e8e4dc;"
-MOVEMENT_CELL_STYLE = "padding:8px 6px;font-family:-apple-system,sans-serif;"
+MOVEMENT_HEADER_ROW = """
+<tr style="font-size:10px;color:#888;font-family:-apple-system,sans-serif;">
+  <td style="padding:4px 6px;">Dato</td>
+  <td style="padding:4px 6px;text-align:right;">Kronos-pris</td>
+  <td style="padding:4px 6px;text-align:right;">Kronos %</td>
+  <td style="padding:4px 6px;text-align:right;">Faktisk</td>
+  <td style="padding:4px 6px;text-align:right;">Avvik</td>
+</tr>"""
+
+MOVEMENT_SYMBOL_HEADER = """
+<tr>
+  <td colspan="5" style="padding:14px 6px 4px;font-family:Georgia,serif;font-size:13px;font-weight:bold;color:#0a0f0a;">{symbol}</td>
+</tr>"""
+
+MOVEMENT_DAY_ROW = """
+<tr style="border-top:1px solid #e8e4dc;">
+  <td style="padding:6px 6px;font-family:-apple-system,sans-serif;font-size:11px;">{date}</td>
+  <td style="padding:6px 6px;text-align:right;font-family:-apple-system,sans-serif;font-size:11px;">{predicted}</td>
+  <td style="padding:6px 6px;text-align:right;font-family:-apple-system,sans-serif;font-size:11px;">{change_pct}</td>
+  <td style="padding:6px 6px;text-align:right;font-family:-apple-system,sans-serif;font-size:11px;">{actual}</td>
+  <td style="padding:6px 6px;text-align:right;color:{diff_color};font-weight:bold;font-family:-apple-system,sans-serif;font-size:11px;">{diff_pct}</td>
+</tr>"""
+
+MOVEMENT_MAE_ROW = """
+<tr style="border-top:1px solid #222;">
+  <td colspan="5" style="padding:6px 6px;font-family:-apple-system,sans-serif;font-size:11px;font-style:italic;color:#555;">Kronos MAE (siste 5 dager): {mae}</td>
+</tr>"""
 
 SIGNAL_COLOR_MAP = {"BUY": "#1a7a1a", "SELL": "#cc2222", "HOLD": "#b8860b"}
 
@@ -255,10 +302,10 @@ def build_accuracy_section(tickers):
     rows_html = []
     any_warning = False
     for t in tickers:
-        mape = t.get("mape")
+        mae = t.get("mean_absolute_error_pct")
         rows_html.append(ACCURACY_ROW.format(
             ticker=t["ticker"],
-            mape=fmt_pct(mape) if mape is not None else "N/A (ingen historikk enda)",
+            mape=fmt_pct(mae) if mae is not None else "N/A (ingen historikk enda)",
         ))
         if t.get("mape_warning"):
             any_warning = True
@@ -389,24 +436,49 @@ def build_repeated_section(screener_history, forecast_history, screener_forecast
     return REPEATED_SECTION_WRAPPER.format(rows="".join(rows_html))
 
 
-def build_movement_rows(dates, tickers, screener_rows, screener_forecasts):
-    header_cells = "".join(
-        f"<td style='{MOVEMENT_CELL_STYLE}color:#888;font-size:10px;'>{d}</td>" for d in dates
-    )
-    rows_html = [
-        f"<tr style='{MOVEMENT_ROW_STYLE}'>"
-        f"<td style='{MOVEMENT_CELL_STYLE}color:#888;font-size:10px;'>Ticker</td>{header_cells}</tr>"
-    ]
+def build_movement_block(symbol, result):
+    """One symbol's block: the last 5 real trading days (predicted-vs-actual,
+    colored by how far off Kronos was) followed by the current 5-day-ahead
+    forecast (no actual yet -- future dates show "-"), then a MAE summary
+    row for that symbol."""
+    rows = [MOVEMENT_SYMBOL_HEADER.format(symbol=symbol)]
+
+    for e in sorted(result.get("daily_errors", []), key=lambda e: e["date"]):
+        diff_pct = e.get("error_pct")
+        rows.append(MOVEMENT_DAY_ROW.format(
+            date=e["date"],
+            predicted=fmt_num(e.get("predicted"), 2),
+            change_pct=fmt_signed_pct(e.get("change_pct")),
+            actual=fmt_num(e.get("actual"), 2),
+            diff_color=diff_color(diff_pct),
+            diff_pct=fmt_pct(diff_pct),
+        ))
+
+    for p in result.get("predicted_prices", []):
+        rows.append(MOVEMENT_DAY_ROW.format(
+            date=p["date"],
+            predicted=fmt_num(p.get("price"), 2),
+            change_pct=fmt_signed_pct(p.get("change_pct")),
+            actual="—",
+            diff_color=diff_color(None),
+            diff_pct="—",
+        ))
+
+    mae = result.get("mean_absolute_error_pct")
+    rows.append(MOVEMENT_MAE_ROW.format(mae=fmt_pct(mae) if mae is not None else "N/A (ingen historikk enda)"))
+    return "".join(rows)
+
+
+def build_movement_rows(tickers, screener_rows, screener_forecasts):
+    blocks = [MOVEMENT_HEADER_ROW]
     for t in tickers:
-        cells = "".join(f"<td style='{MOVEMENT_CELL_STYLE}text-align:right;'>{fmt_num(p, 2)}</td>" for p in t["daily_prices"])
-        rows_html.append(f"<tr style='{MOVEMENT_ROW_STYLE}'><td style='{MOVEMENT_CELL_STYLE}font-weight:600;'>{t['ticker']}</td>{cells}</tr>")
+        blocks.append(build_movement_block(t["ticker"], t))
     for row in screener_rows:
-        daily_prices = get_kronos_forecast(screener_forecasts, row["symbol"])["daily_prices"]
-        if not daily_prices:
+        forecast = screener_forecasts.get(row["symbol"])
+        if not forecast:
             continue
-        cells = "".join(f"<td style='{MOVEMENT_CELL_STYLE}text-align:right;'>{fmt_num(p, 2)}</td>" for p in daily_prices)
-        rows_html.append(f"<tr style='{MOVEMENT_ROW_STYLE}'><td style='{MOVEMENT_CELL_STYLE}font-weight:600;'>{row['symbol']}</td>{cells}</tr>")
-    return "".join(rows_html)
+        blocks.append(build_movement_block(row["symbol"], forecast))
+    return "".join(blocks)
 
 
 def build_market_analysis(screener_rows, screener_forecasts):
@@ -449,7 +521,6 @@ def build_market_analysis(screener_rows, screener_forecasts):
 
 def build_html_body(screener_rows, forecast_data, screener_history, forecast_history):
     today = date.today().isoformat()
-    dates = forecast_data["dates"]
     tickers = forecast_data["tickers"]
     screener_forecasts = forecast_data.get("screener_forecasts", {})
     accuracy_rows, accuracy_warning = build_accuracy_section(tickers)
@@ -459,7 +530,7 @@ def build_html_body(screener_rows, forecast_data, screener_history, forecast_his
         screener_rows=build_screener_rows(screener_rows, screener_forecasts),
         repeated_section=build_repeated_section(screener_history, forecast_history, screener_forecasts),
         portfolio_rows=build_portfolio_rows(tickers),
-        movement_rows=build_movement_rows(dates, tickers, screener_rows, screener_forecasts),
+        movement_rows=build_movement_rows(tickers, screener_rows, screener_forecasts),
         accuracy_rows=accuracy_rows,
         accuracy_warning=accuracy_warning,
         market_analysis=build_market_analysis(screener_rows, screener_forecasts),
@@ -482,7 +553,7 @@ def build_text_body(screener_rows, forecast_data):
     lines += ["", "PORTFOLIO - 5-DAY FORECAST"]
     for t in forecast_data["tickers"]:
         roic_pct = t["roic"] * 100 if t["roic"] is not None else None
-        mape = t.get("mape")
+        mae = t.get("mean_absolute_error_pct")
         lines.append(
             f"{t['ticker']}: {fmt_num(t['current_price'], 2)} -> {fmt_num(t['avg_forecast'], 2)} "
             f"({fmt_signed_pct(t['change_pct'])}) | {t['signal']} | EV/EBITDA: {fmt_num(t['ev_ebitda'])} "
@@ -491,7 +562,7 @@ def build_text_body(screener_rows, forecast_data):
         lines.append(
             f"    Yesterday close (Kronos baseline): {fmt_num(t.get('current_price'), 2)} | "
             f"Today open: {fmt_num(t.get('today_open'), 2)} | Gap: {fmt_signed_pct(t.get('gap_pct'))} | "
-            f"MAPE: {fmt_pct(mape) if mape is not None else 'N/A'}"
+            f"MAE (last 5 days): {fmt_pct(mae) if mae is not None else 'N/A'}"
         )
     return "\n".join(lines)
 

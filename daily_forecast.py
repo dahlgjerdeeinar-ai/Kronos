@@ -129,6 +129,25 @@ def forecast_ticker(predictor, ticker, future_dates):
     roic = info.get("returnOnEquity")  # proxy for ROIC when true ROIC isn't exposed by yfinance
     valuation_label = get_valuation_label(ev_ebitda)
 
+    # predicted_prices: the 5-day-ahead Kronos forecast, each day's % change
+    # measured against this same current_price baseline (never today_open).
+    # actual_prices: the last 5 REAL trading days already in df -- no extra
+    # yfinance call needed, this is exactly the tail of the data Kronos was
+    # given as input.
+    predicted_prices = [
+        {
+            "date": d.strftime("%Y-%m-%d"),
+            "price": p,
+            "change_pct": ((p - current_price) / current_price * 100) if current_price else None,
+        }
+        for d, p in zip(future_dates, daily_prices)
+    ]
+    actual_tail = df.tail(5)
+    actual_prices = [
+        {"date": ts.strftime("%Y-%m-%d"), "price": float(c)}
+        for ts, c in zip(actual_tail["timestamps"], actual_tail["close"])
+    ]
+
     return {
         "ticker": ticker,
         "current_price": current_price,
@@ -141,6 +160,8 @@ def forecast_ticker(predictor, ticker, future_dates):
         "valuation_label": valuation_label,
         "roic": roic,
         "daily_prices": daily_prices,
+        "predicted_prices": predicted_prices,
+        "actual_prices": actual_prices,
     }
 
 
@@ -159,19 +180,6 @@ def load_forecast_history():
 
 def save_forecast_history(history):
     FORECAST_HISTORY_PATH.write_text(json.dumps(history))
-
-
-def fetch_actual_closes(ticker, days=5):
-    try:
-        hist = yf.download(ticker, period="10d", interval="1d", auto_adjust=True, progress=False)
-    except Exception:
-        return {}
-    if hist.empty:
-        return {}
-    if isinstance(hist.columns, pd.MultiIndex):
-        hist.columns = hist.columns.get_level_values(0)
-    hist = hist.tail(days)
-    return {ts.strftime("%Y-%m-%d"): float(close) for ts, close in zip(hist.index, hist["Close"]) if pd.notna(close)}
 
 
 def record_forecast_snapshot(history, key, result, dates, snapshot_date):
@@ -193,20 +201,44 @@ def record_forecast_snapshot(history, key, result, dates, snapshot_date):
     history[key] = history[key][-MAX_HISTORY_SNAPSHOTS:]
 
 
-def compute_mape(ticker, history, actual_closes):
-    """Matches each past snapshot's predicted (date, price) pairs against
-    actual closes that have since materialized. Returns None if no past
-    prediction has matured yet (e.g. first run, or all forecast dates are
-    still in the future)."""
-    errors = []
-    for snapshot in history.get(ticker, []):
-        for forecast_date, predicted in zip(snapshot.get("dates", []), snapshot.get("daily_prices", [])):
-            actual = actual_closes.get(forecast_date)
-            if actual:
-                errors.append(abs(predicted - actual) / actual * 100.0)
-    if not errors:
-        return None
-    return sum(errors) / len(errors)
+def compute_daily_errors(key, history, actual_prices):
+    """For each of the last 5 REAL trading days (actual_prices), finds the
+    most recent past forecast snapshot that had predicted that exact date
+    and compares it against the actual close. A date can appear in more
+    than one past snapshot's 5-day window (e.g. both yesterday's and the
+    day before's forecast cover today) -- the most recent snapshot is used
+    since it's the freshest prediction for that date.
+
+    Returns (daily_errors, mean_absolute_error_pct); the mean is None if
+    nothing has matured yet (e.g. the very first run)."""
+    snapshots_newest_first = sorted(history.get(key, []), key=lambda s: s.get("snapshot_date", ""), reverse=True)
+
+    daily_errors = []
+    for actual in actual_prices:
+        target_date = actual["date"]
+        actual_price = actual["price"]
+        for snapshot in snapshots_newest_first:
+            snap_dates = snapshot.get("dates", [])
+            if target_date not in snap_dates:
+                continue
+            idx = snap_dates.index(target_date)
+            predicted = snapshot.get("daily_prices", [None] * len(snap_dates))[idx]
+            baseline = snapshot.get("current_price")
+            if predicted is None or not actual_price:
+                break
+            daily_errors.append({
+                "date": target_date,
+                "predicted": predicted,
+                "actual": actual_price,
+                "change_pct": ((predicted - baseline) / baseline * 100) if baseline else None,
+                "error_pct": abs(predicted - actual_price) / actual_price * 100.0,
+            })
+            break
+
+    if not daily_errors:
+        return daily_errors, None
+    mean_error = sum(e["error_pct"] for e in daily_errors) / len(daily_errors)
+    return daily_errors, mean_error
 
 
 def run_forecast(screener_symbols=None):
@@ -231,28 +263,29 @@ def run_forecast(screener_symbols=None):
         except Exception:
             screener_forecasts[symbol] = None
 
-    # Kronos accuracy diagnostic + history recording. Portfolio tickers get
-    # a MAPE comparison against their own past forecasts (surfaced in the
-    # "Kronos noyaktighet" email section). Screener candidates are recorded
-    # too (keyed by screener symbol, not the resolved yahoo ticker) so
-    # send_email.py's "Gjentatte screende aksjer" section can look up what
-    # Kronos said about a repeated symbol on each historical date without
-    # needing a second network round-trip. Neither touches the model itself
-    # -- purely a bookkeeping/reporting pass over its outputs.
+    # Kronos accuracy diagnostic + history recording, for portfolio tickers
+    # AND screener candidates alike (keyed by ticker / bare screener symbol
+    # respectively). For each, compare its own last 5 real trading days
+    # (already in actual_prices, no extra fetch) against whatever past
+    # snapshot had predicted those dates, then record today's forecast for
+    # future comparisons. Purely a bookkeeping/reporting pass over the
+    # model's outputs -- doesn't touch the model itself.
     forecast_history = load_forecast_history()
     today_str = datetime.today().strftime("%Y-%m-%d")
 
+    def attach_accuracy(key, result):
+        daily_errors, mean_error = compute_daily_errors(key, forecast_history, result["actual_prices"])
+        result["daily_errors"] = daily_errors
+        result["mean_absolute_error_pct"] = mean_error
+        result["mape_warning"] = mean_error is not None and mean_error > 5
+        record_forecast_snapshot(forecast_history, key, result, dates, today_str)
+
     for result in results:
-        ticker = result["ticker"]
-        actual_closes = fetch_actual_closes(ticker)
-        mape = compute_mape(ticker, forecast_history, actual_closes)
-        result["mape"] = mape
-        result["mape_warning"] = mape is not None and mape > 5
-        record_forecast_snapshot(forecast_history, ticker, result, dates, today_str)
+        attach_accuracy(result["ticker"], result)
 
     for symbol, result in screener_forecasts.items():
         if result is not None:
-            record_forecast_snapshot(forecast_history, symbol, result, dates, today_str)
+            attach_accuracy(symbol, result)
 
     save_forecast_history(forecast_history)
 
