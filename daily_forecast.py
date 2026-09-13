@@ -29,12 +29,10 @@ NORDIC_SUFFIXES = [".CO", ".ST", ".HE", ".OL"]
 # samples autoregressively), no change to the model itself.
 SAMPLE_RUNS = 3
 
-# Mirrors KronosPredictor(..., max_context=512) below. The Kronos paper's
-# own example (examples/prediction_example.py) uses lookback=400 against a
-# max_context=512 predictor -- i.e. as much history as is reasonably
-# available, capped at max_context. We cap at the same 512 and use however
-# much of it yfinance actually returns.
-MAX_LOOKBACK = 512
+# Matches the Kronos paper's own example (examples/prediction_example.py),
+# which uses lookback=400 against a max_context=512 predictor. Capped at
+# however much of it yfinance actually returns.
+MAX_LOOKBACK = 400
 
 GAP_WARNING_THRESHOLD = 0.5  # flag a >50% single-day close-to-close move
 
@@ -112,9 +110,10 @@ def print_kronos_usage_analysis():
         "matching the example -- calc_time_stamps() calls x_timestamp.dt.<attr>, "
         "which requires a Series (a raw DatetimeIndex has no .dt accessor and would "
         "raise). Per-ticker timezone-naive check logged below.",
-        f"Lookback: MAX_LOOKBACK={MAX_LOOKBACK} (mirrors max_context), using "
-        "df.tail(lookback) -- most recent data, not df.head(). Per-ticker lookback "
-        "actually used (bounded by however much history yfinance returns) logged below.",
+        f"Lookback: MAX_LOOKBACK={MAX_LOOKBACK} (matches the example's own lookback=400, "
+        "within the predictor's max_context=512), using df.tail(lookback) -- most recent "
+        "data, not df.head(). Per-ticker lookback actually used (bounded by however much "
+        "history yfinance returns) logged below.",
     ]
     for line in lines:
         print(f"[daily_forecast] {line}", file=sys.stderr)
@@ -162,10 +161,9 @@ def resolve_ticker(symbol):
 
 def forecast_ticker(predictor, ticker, future_dates):
     try:
-        # 3y (vs the previous 6mo) so there's enough history to actually use
-        # up to MAX_LOOKBACK=512 days of context, per the Kronos paper's
-        # recommendation to use as much of max_context as is available.
-        df = yf.download(ticker, period="3y", interval="1d", auto_adjust=True, progress=False)
+        # 2y so there's comfortably enough history to reach MAX_LOOKBACK=400
+        # trading days of context (~1.5y of actual trading days).
+        df = yf.download(ticker, period="2y", interval="1d", auto_adjust=True, progress=False)
     except Exception:
         return None
     if df.empty:

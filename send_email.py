@@ -85,6 +85,8 @@ EMAIL_TEMPLATE = """<!DOCTYPE html>
         <strong>Kronos:</strong> AI-modell trent på 12 milliarder kursdata-rekorder fra 45 globale børser.
         Spår kortsiktige kursbevegelser (5 dager) basert på historiske OHLCV-mønstre.
         Kronos er et timing-verktøy — ikke et seleksjonsverktøy.<br><br>
+        Kronos analyserer de siste 400 handelsdagene (~1.5 år) med kursdata per aksje,
+        og kjøres 3 ganger per aksje for å redusere tilfeldige variasjoner i prognosen.<br><br>
         <strong>Signaler:</strong><br>
         &#9679; BUY: Kronos spår over +2% vekst på 5 dager<br>
         &#9679; HOLD: Kronos spår mellom -4% og +2%<br>
