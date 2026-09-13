@@ -52,8 +52,6 @@ EMAIL_TEMPLATE = """<!DOCTYPE html>
       {screener_rows}
     </table>
 
-    {repeated_section}
-
     <div style="font-family:-apple-system,sans-serif;font-size:10px;color:#555;letter-spacing:2px;text-transform:uppercase;margin:24px 0 14px;border-bottom:1px solid #222;padding-bottom:6px;">Portefølje · 5-dagers prognose</div>
     <table style="width:100%;font-size:13px;border-collapse:collapse;font-family:-apple-system,sans-serif;">
       {portfolio_rows}
@@ -63,6 +61,8 @@ EMAIL_TEMPLATE = """<!DOCTYPE html>
     <table style="width:100%;font-size:12px;border-collapse:collapse;font-family:-apple-system,sans-serif;">
       {movement_rows}
     </table>
+
+    {repeated_section}
 
     <div style="font-family:-apple-system,sans-serif;font-size:10px;color:#555;letter-spacing:2px;text-transform:uppercase;margin:24px 0 14px;border-bottom:1px solid #222;padding-bottom:6px;">Kronos nøyaktighet (siste dager)</div>
     <table style="width:100%;font-size:13px;border-collapse:collapse;font-family:-apple-system,sans-serif;">
@@ -139,7 +139,10 @@ MOVEMENT_HEADER_ROW = """
 
 MOVEMENT_SYMBOL_HEADER = """
 <tr>
-  <td colspan="5" style="padding:14px 6px 4px;font-family:Georgia,serif;font-size:13px;font-weight:bold;color:#0a0f0a;">{symbol}</td>
+  <td colspan="5" style="padding:14px 6px 0;font-family:Georgia,serif;font-size:13px;font-weight:bold;color:#0a0f0a;">{symbol}</td>
+</tr>
+<tr>
+  <td colspan="5" style="padding:0 6px 6px;font-family:-apple-system,sans-serif;font-size:10px;color:#888;">{reason}</td>
 </tr>"""
 
 MOVEMENT_DAY_ROW = """
@@ -163,27 +166,27 @@ REPEATED_SECTION_WRAPPER = """
 <table style="width:100%;font-size:12px;border-collapse:collapse;">
   <tr style="font-size:10px;color:#888;font-family:-apple-system,sans-serif;">
     <td style="padding:4px 6px;">Dato</td>
-    <td style="padding:4px 6px;text-align:center;">Score</td>
-    <td style="padding:4px 6px;text-align:center;">Kronos</td>
+    <td style="padding:4px 6px;text-align:right;">Kronos-pris</td>
     <td style="padding:4px 6px;text-align:right;">Kronos %</td>
     <td style="padding:4px 6px;text-align:right;">Faktisk</td>
-    <td style="padding:4px 6px;text-align:right;">Avvik</td>
+    <td style="padding:4px 6px;text-align:right;">Avvik (pris)</td>
+    <td style="padding:4px 6px;text-align:right;">Avvik (%)</td>
   </tr>
   {rows}
 </table>"""
 
 REPEATED_SYMBOL_HEADER = """
 <tr>
-  <td colspan="6" style="padding:14px 6px 4px;font-family:Georgia,serif;font-size:13px;font-weight:bold;color:#0a0f0a;">{symbol}</td>
+  <td colspan="6" style="padding:14px 6px 4px;font-family:Georgia,serif;font-size:13px;font-weight:bold;color:#0a0f0a;">{symbol} <span style="font-family:-apple-system,sans-serif;font-size:10px;font-weight:normal;color:#888;">&middot; quant score (siste): {quant_score}</span></td>
 </tr>"""
 
 REPEATED_ROW = """
 <tr style="border-top:1px solid #e8e4dc;">
   <td style="padding:8px 6px;font-family:-apple-system,sans-serif;">{date}</td>
-  <td style="padding:8px 6px;text-align:center;font-family:-apple-system,sans-serif;">{quant_score}</td>
-  <td style="padding:8px 6px;text-align:center;color:{signal_color};font-weight:bold;font-family:-apple-system,sans-serif;">{kronos_signal}</td>
+  <td style="padding:8px 6px;text-align:right;font-family:-apple-system,sans-serif;">{predicted_price}</td>
   <td style="padding:8px 6px;text-align:right;font-family:-apple-system,sans-serif;">{forecast_pct}</td>
   <td style="padding:8px 6px;text-align:right;font-family:-apple-system,sans-serif;">{actual_close}</td>
+  <td style="padding:8px 6px;text-align:right;color:{diff_color};font-weight:bold;font-family:-apple-system,sans-serif;">{diff_price}</td>
   <td style="padding:8px 6px;text-align:right;color:{diff_color};font-weight:bold;font-family:-apple-system,sans-serif;">{diff_pct}</td>
 </tr>"""
 
@@ -383,65 +386,93 @@ def diff_color(diff_pct):
     return "#cc2222"
 
 
-def find_forecast_snapshot(forecast_history, symbol, snapshot_date):
-    for snap in forecast_history.get(symbol, []):
-        if snap.get("snapshot_date") == snapshot_date:
-            return snap
+def find_predicted_price(forecast_history, symbol, target_date):
+    """Among ALL past snapshots for `symbol` (not just the one made on
+    target_date itself), finds the most recent one whose 5-day forecast
+    window actually included target_date, and returns the day-specific
+    predicted price for it -- the same "freshest snapshot wins" tie-break
+    daily_forecast.py's compute_daily_errors uses when more than one past
+    snapshot covered the same date.
+
+    This replaces an earlier version of this section that compared the
+    day's own baseline (current_price, i.e. roughly yesterday's close) to
+    the actual close -- which is nearly meaningless since those two prices
+    are almost always the same. What actually needs comparing is what
+    Kronos had predicted for target_date versus what really happened."""
+    snapshots_newest_first = sorted(forecast_history.get(symbol, []), key=lambda s: s.get("snapshot_date", ""), reverse=True)
+    for snap in snapshots_newest_first:
+        snap_dates = snap.get("dates", [])
+        if target_date not in snap_dates:
+            continue
+        idx = snap_dates.index(target_date)
+        daily_prices = snap.get("daily_prices", [])
+        if idx >= len(daily_prices):
+            continue
+        predicted_price = daily_prices[idx]
+        baseline = snap.get("current_price")
+        change_pct = ((predicted_price - baseline) / baseline * 100) if baseline else None
+        return {"predicted_price": predicted_price, "change_pct": change_pct, "signal": snap.get("signal")}
     return None
 
 
 def build_repeated_section(screener_history, forecast_history, screener_forecasts):
     """Screener-only by construction: repeated symbols come from
-    screener_history.json (screener.py's own candidate list), and the
-    Kronos signal/forecast/baseline shown for each historical date are
-    looked up from forecast_history.json under that same screener symbol
-    (never a portfolio ticker) for that exact date -- so a symbol's row
-    always reflects what Kronos actually said about it on that day, not
-    today's run bleeding backwards onto older rows."""
+    screener_history.json (screener.py's own candidate list). The Kronos
+    forecast price shown for each historical date comes from
+    forecast_history.json under that same screener symbol (never a
+    portfolio ticker), via find_predicted_price above."""
     repeated = find_repeated_symbols(screener_history)
     if not repeated:
         return ""
+
+    latest_quant_score = {}
+    for entry in screener_history:
+        for c in entry.get("candidates", []):
+            latest_quant_score[c["symbol"]] = c.get("quant_score")
 
     rows_html = []
     for symbol in sorted(repeated):
         yahoo_ticker = resolve_yahoo_ticker(symbol, screener_forecasts)
         actual_closes = fetch_recent_closes(yahoo_ticker) if yahoo_ticker else {}
-        rows_html.append(REPEATED_SYMBOL_HEADER.format(symbol=symbol))
+        rows_html.append(REPEATED_SYMBOL_HEADER.format(
+            symbol=symbol,
+            quant_score=fmt_num(latest_quant_score.get(symbol), 0),
+        ))
         for entry in screener_history:
             match = next((c for c in entry.get("candidates", []) if c["symbol"] == symbol), None)
             if match is None:
                 continue
             entry_date = entry["date"]
-            snap = find_forecast_snapshot(forecast_history, symbol, entry_date) or {}
-            kronos_signal = snap.get("signal")
-            forecast_pct = snap.get("change_pct")
-            baseline_price = snap.get("current_price")
+            prediction = find_predicted_price(forecast_history, symbol, entry_date)
+            predicted_price = prediction["predicted_price"] if prediction else None
+            forecast_pct = prediction["change_pct"] if prediction else None
 
             actual_close = actual_closes.get(entry_date)
+            diff_price = None
             diff_pct = None
-            if actual_close is not None and baseline_price is not None and actual_close:
-                diff_pct = abs(baseline_price - actual_close) / actual_close * 100.0
+            if actual_close is not None and predicted_price is not None and actual_close:
+                diff_price = predicted_price - actual_close
+                diff_pct = abs(diff_price) / actual_close * 100.0
 
             rows_html.append(REPEATED_ROW.format(
                 date=entry_date,
-                quant_score=fmt_num(match.get("quant_score"), 0),
-                signal_color=signal_color(kronos_signal),
-                kronos_signal=kronos_signal or "N/A",
+                predicted_price=fmt_num(predicted_price, 2),
                 forecast_pct=fmt_signed_pct(forecast_pct),
                 actual_close=fmt_num(actual_close, 2),
                 diff_color=diff_color(diff_pct),
+                diff_price=fmt_num(diff_price, 2) if diff_price is not None else "N/A",
                 diff_pct=fmt_pct(diff_pct),
             ))
 
     return REPEATED_SECTION_WRAPPER.format(rows="".join(rows_html))
 
 
-def build_movement_block(symbol, result):
+def build_movement_block(symbol, result, reason):
     """One symbol's block: the last 5 real trading days (predicted-vs-actual,
     colored by how far off Kronos was) followed by the current 5-day-ahead
     forecast (no actual yet -- future dates show "-"), then a MAE summary
     row for that symbol."""
-    rows = [MOVEMENT_SYMBOL_HEADER.format(symbol=symbol)]
+    rows = [MOVEMENT_SYMBOL_HEADER.format(symbol=symbol, reason=reason)]
 
     for e in sorted(result.get("daily_errors", []), key=lambda e: e["date"]):
         diff_pct = e.get("error_pct")
@@ -472,12 +503,22 @@ def build_movement_block(symbol, result):
 def build_movement_rows(tickers, screener_rows, screener_forecasts):
     blocks = [MOVEMENT_HEADER_ROW]
     for t in tickers:
-        blocks.append(build_movement_block(t["ticker"], t))
+        roic_pct = t["roic"] * 100 if t.get("roic") is not None else None
+        reason = (
+            f"EV/EBITDA: {fmt_num(t.get('ev_ebitda'))} &middot; "
+            f"ROIC: {fmt_pct(roic_pct)} &middot; Signal: {t.get('signal', 'N/A')}"
+        )
+        blocks.append(build_movement_block(t["ticker"], t, reason))
     for row in screener_rows:
         forecast = screener_forecasts.get(row["symbol"])
         if not forecast:
             continue
-        blocks.append(build_movement_block(row["symbol"], forecast))
+        reason = (
+            f"Quant: {fmt_num(row.get('quant_score'), 0)} &middot; "
+            f"EV/E: {fmt_num(row.get('ev_ebitda'))} &middot; "
+            f"6M mom: {fmt_signed_pct(row.get('momentum_6m'))}"
+        )
+        blocks.append(build_movement_block(row["symbol"], forecast, reason))
     return "".join(blocks)
 
 
