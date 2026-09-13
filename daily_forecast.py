@@ -145,6 +145,72 @@ def fetch_today_open(ticker):
     return float(open_df["Open"].iloc[-1])
 
 
+def fetch_live_market_price(ticker):
+    """Purely diagnostic: yfinance fast_info's live/last price, used ONLY to
+    detect and log a divergence from Kronos's baseline (x_df's last close).
+    Never assigned to current_price itself -- that stays the sole baseline,
+    per the standing rule that Kronos's % change is always measured from
+    exactly the price it was given as input, never a separately-fetched
+    live price."""
+    try:
+        fast_info = yf.Ticker(ticker).fast_info
+    except Exception:
+        return None
+    try:
+        price = fast_info.get("last_price") if hasattr(fast_info, "get") else getattr(fast_info, "last_price", None)
+    except Exception:
+        price = None
+    return float(price) if price is not None else None
+
+
+def build_stale_result(ticker, df, current_price, baseline_gap_warning):
+    """Data was too old to trust with Kronos -- rather than the ticker
+    silently vanishing from the output (the old return-None behavior),
+    return a placeholder so send_email.py can still show it with a clear
+    "DATA STALE" label (signal_color() already falls back to grey for any
+    unrecognized signal string, so no email-side changes are needed)."""
+    ticker_obj = yf.Ticker(ticker)
+    try:
+        info = ticker_obj.info
+    except Exception:
+        info = {}
+    today_open = fetch_today_open(ticker)
+    gap_pct = (
+        ((today_open - current_price) / current_price) * 100
+        if today_open is not None and current_price
+        else None
+    )
+    ev_ebitda = info.get("enterpriseToEbitda")
+    roic = info.get("returnOnEquity")
+    valuation_label = get_valuation_label(ev_ebitda)
+
+    actual_tail = df.tail(5)
+    actual_prices = [
+        {"date": ts.strftime("%Y-%m-%d"), "price": float(c)}
+        for ts, c in zip(actual_tail["timestamps"], actual_tail["close"])
+    ]
+
+    return {
+        "ticker": ticker,
+        "current_price": current_price,
+        "today_open": today_open,
+        "gap_pct": gap_pct,
+        "avg_forecast": None,
+        "change_pct": None,
+        "signal": "DATA STALE",
+        "ev_ebitda": ev_ebitda,
+        "valuation_label": valuation_label,
+        "roic": roic,
+        "daily_prices": [],
+        "predicted_prices": [],
+        "actual_prices": actual_prices,
+        "stale": True,
+        "baseline_gap_warning": baseline_gap_warning,
+        "unreliable": False,
+        "high_variance": False,
+    }
+
+
 def resolve_ticker(symbol):
     for suffix in NORDIC_SUFFIXES:
         candidate = f"{symbol}{suffix}"
@@ -179,11 +245,6 @@ def forecast_ticker(predictor, ticker, future_dates):
     df = df.reset_index(drop=True)
 
     lookback = min(MAX_LOOKBACK, len(df))
-    print(
-        f"[daily_forecast] ANALYSIS {ticker}: lookback={lookback} "
-        f"(of {len(df)} trading days downloaded, capped at MAX_LOOKBACK={MAX_LOOKBACK})",
-        file=sys.stderr,
-    )
     recent_df = df.tail(lookback).reset_index(drop=True)  # most recent data, not df.head()
     x_df = recent_df[["open", "high", "low", "close", "volume"]]
 
@@ -193,21 +254,49 @@ def forecast_ticker(predictor, ticker, future_dates):
     last_date = recent_df["timestamps"].iloc[-1]
     today = pd.Timestamp(datetime.today().date())
     stale_trading_days = len(pd.bdate_range(start=last_date, end=today)) - 1 if last_date <= today else 0
+    is_stale = stale_trading_days > 3
 
-    if stale_trading_days > 5:
+    first_close = float(x_df["close"].iloc[0])
+    # Always anchor on the exact same last close Kronos was given as input --
+    # never a separately-fetched live price -- so the forecasted % change is
+    # measured from Kronos's own baseline, not a moving target.
+    current_price = float(x_df["close"].iloc[-1])
+
+    # Purely diagnostic comparison against a live yfinance price -- NEVER
+    # used as current_price itself, only to detect and log a divergence.
+    live_market_price = fetch_live_market_price(ticker)
+    baseline_gap_pct = (
+        abs(live_market_price - current_price) / current_price * 100
+        if live_market_price is not None and current_price
+        else None
+    )
+    baseline_gap_warning = baseline_gap_pct is not None and baseline_gap_pct > 5
+
+    print(
+        f"[daily_forecast] TROUBLESHOOT {ticker}: last_date={last_date.date()} "
+        f"({stale_trading_days} trading days old, stale={is_stale}) | "
+        f"first_close={first_close:.4f} | last_close/Kronos_baseline={current_price:.4f} | "
+        f"live_market_price={'N/A' if live_market_price is None else f'{live_market_price:.4f}'} | "
+        f"baseline_gap={'N/A' if baseline_gap_pct is None else f'{baseline_gap_pct:.2f}%'} | "
+        f"lookback={lookback} (of {len(df)} trading days downloaded, capped at MAX_LOOKBACK={MAX_LOOKBACK})",
+        file=sys.stderr,
+    )
+
+    if baseline_gap_warning:
+        print(
+            f"[daily_forecast] WARNING: {ticker} baseline gap {baseline_gap_pct:.2f}% exceeds 5% -- "
+            f"Kronos baseline ({current_price}) and live market price ({live_market_price}) diverge significantly",
+            file=sys.stderr,
+        )
+
+    if is_stale:
         print(
             f"[daily_forecast] STALE DATA WARNING: {ticker} last available date "
-            f"{last_date.date()} is {stale_trading_days} trading days old (> 5) -- "
+            f"{last_date.date()} is {stale_trading_days} trading days old (> 3) -- "
             "skipping Kronos for this ticker rather than producing a misleading forecast",
             file=sys.stderr,
         )
-        return None
-    elif stale_trading_days > 3:
-        print(
-            f"[daily_forecast] WARNING: Data for {ticker} is stale — last date: "
-            f"{last_date.date()}. Forecasts may be unreliable.",
-            file=sys.stderr,
-        )
+        return build_stale_result(ticker, df, current_price, baseline_gap_warning)
 
     validate_input_data(recent_df, ticker)
 
@@ -217,7 +306,7 @@ def forecast_ticker(predictor, ticker, future_dates):
     # Run inference SAMPLE_RUNS times and average the close-price path across
     # runs -- Kronos samples autoregressively (T/top_p), so repeated calls on
     # identical input vary; averaging reduces that variance without touching
-    # the model. Reports the per-day std dev across runs as a variance signal.
+    # the model.
     run_closes = []
     for _ in range(SAMPLE_RUNS):
         run_df = predictor.predict(
@@ -226,24 +315,18 @@ def forecast_ticker(predictor, ticker, future_dates):
         )
         run_closes.append(run_df["close"].to_numpy(dtype=float))
     runs_array = np.array(run_closes)  # shape (SAMPLE_RUNS, 5)
-    daily_prices = runs_array.mean(axis=0).tolist()
-    daily_prices_std = runs_array.std(axis=0).tolist()
-    print(
-        f"[daily_forecast] ANALYSIS {ticker}: {SAMPLE_RUNS}-run std dev per day = "
-        f"{[round(s, 4) for s in daily_prices_std]}, mean std = {np.mean(daily_prices_std):.4f}",
-        file=sys.stderr,
-    )
+    daily_prices_mean = runs_array.mean(axis=0)
+    daily_prices_std = runs_array.std(axis=0)
+    # Coefficient of variation per day (std as a % of that day's mean
+    # prediction), averaged across the 5 days -- a scale-independent
+    # variance signal (unlike raw std, which isn't comparable across
+    # tickers with very different price levels).
+    with np.errstate(divide="ignore", invalid="ignore"):
+        cv_per_day = np.where(daily_prices_mean != 0, daily_prices_std / np.abs(daily_prices_mean) * 100, 0.0)
+    variance_pct = float(np.mean(cv_per_day))
+    high_variance = variance_pct > 3
 
-    ticker_obj = yf.Ticker(ticker)
-    try:
-        info = ticker_obj.info
-    except Exception:
-        info = {}
-
-    # Always anchor on the exact same last close Kronos was given as input --
-    # never a separately-fetched live price -- so the forecasted % change is
-    # measured from Kronos's own baseline, not a moving target.
-    current_price = float(x_df["close"].iloc[-1])
+    daily_prices = [float(p) for p in daily_prices_mean]
 
     if ticker.upper().startswith("BULTEN"):
         print(
@@ -255,6 +338,12 @@ def forecast_ticker(predictor, ticker, future_dates):
             file=sys.stderr,
         )
 
+    ticker_obj = yf.Ticker(ticker)
+    try:
+        info = ticker_obj.info
+    except Exception:
+        info = {}
+
     today_open = fetch_today_open(ticker)
     gap_pct = (
         ((today_open - current_price) / current_price) * 100
@@ -262,26 +351,32 @@ def forecast_ticker(predictor, ticker, future_dates):
         else None
     )
 
-    daily_prices = [float(p) for p in daily_prices]
     avg_forecast = float(np.mean(daily_prices))
     change_pct = ((avg_forecast - current_price) / current_price) * 100
+    unreliable = abs(change_pct) > 15
 
-    if abs(change_pct) > 15:
-        kronos_baseline = float(recent_df["close"].iloc[-1])
+    print(
+        f"[daily_forecast] TROUBLESHOOT {ticker}: individual runs (close, {SAMPLE_RUNS}x5)={runs_array.tolist()} | "
+        f"averaged={[round(p, 4) for p in daily_prices]} | change_pct={change_pct:+.2f}% | stale={is_stale} | "
+        f"unreliable={unreliable} | std_dev_per_day={[round(s, 4) for s in daily_prices_std.tolist()]} | "
+        f"variance_pct={variance_pct:.2f}% | high_variance={high_variance}",
+        file=sys.stderr,
+    )
+
+    if unreliable:
         print(
             f"[daily_forecast] WARNING: {ticker} predicted change {change_pct:+.1f}% exceeds 15% -- "
-            f"dumping diagnostics to check for a baseline mismatch:\n"
-            f"  current_price used: {current_price}\n"
-            f"  Kronos baseline (last row of x_df, close): {kronos_baseline}\n"
-            f"  last 5 rows of x_df:\n"
-            f"{recent_df[['timestamps', 'open', 'high', 'low', 'close', 'volume']].tail(5).to_string(index=False)}\n"
-            f"  individual run predictions (close, {SAMPLE_RUNS} runs x 5 days):\n"
-            f"{runs_array}\n"
-            f"  averaged daily_prices used: {daily_prices}",
+            f"marking UNRELIABLE instead of BUY/SELL/HOLD. Last 5 rows of x_df:\n"
+            f"{recent_df[['timestamps', 'open', 'high', 'low', 'close', 'volume']].tail(5).to_string(index=False)}",
+            file=sys.stderr,
+        )
+    if high_variance:
+        print(
+            f"[daily_forecast] WARNING: {ticker} {SAMPLE_RUNS}-run variance {variance_pct:.2f}% exceeds 3% -- HIGH VARIANCE",
             file=sys.stderr,
         )
 
-    signal = "BUY" if change_pct > 2 else ("SELL" if change_pct < -4 else "HOLD")
+    signal = "UNRELIABLE" if unreliable else ("BUY" if change_pct > 2 else ("SELL" if change_pct < -4 else "HOLD"))
 
     ev_ebitda = info.get("enterpriseToEbitda")
     roic = info.get("returnOnEquity")  # proxy for ROIC when true ROIC isn't exposed by yfinance
@@ -320,6 +415,10 @@ def forecast_ticker(predictor, ticker, future_dates):
         "daily_prices": daily_prices,
         "predicted_prices": predicted_prices,
         "actual_prices": actual_prices,
+        "stale": False,
+        "baseline_gap_warning": baseline_gap_warning,
+        "unreliable": unreliable,
+        "high_variance": high_variance,
     }
 
 
@@ -441,7 +540,12 @@ def run_forecast(screener_symbols=None):
         result["daily_errors"] = daily_errors
         result["mean_absolute_error_pct"] = mean_error
         result["mape_warning"] = mean_error is not None and mean_error > 5
-        record_forecast_snapshot(forecast_history, key, result, dates, today_str)
+        # A stale result has no new forecast (daily_prices/signal are
+        # placeholders) -- nothing worth recording for future comparison,
+        # though the daily_errors comparison above still ran against
+        # whatever actual_prices we do have.
+        if not result.get("stale"):
+            record_forecast_snapshot(forecast_history, key, result, dates, today_str)
 
     for result in results:
         attach_accuracy(result["ticker"], result)
@@ -455,9 +559,23 @@ def run_forecast(screener_symbols=None):
     screener_successes = sum(1 for v in screener_forecasts.values() if v is not None)
     print(
         f"[daily_forecast] ANALYSIS summary: {len(results)}/{len(TICKERS)} portfolio tickers "
-        f"and {screener_successes}/{len(screener_symbols or [])} screener candidates forecasted "
-        f"successfully, each averaged over SAMPLE_RUNS={SAMPLE_RUNS} runs (see per-ticker lines above "
-        "for lookback/variance/data-quality detail).",
+        f"and {screener_successes}/{len(screener_symbols or [])} screener candidates returned a "
+        f"result (including stale placeholders), each averaged over SAMPLE_RUNS={SAMPLE_RUNS} runs "
+        "(see per-ticker lines above for lookback/variance/data-quality detail).",
+        file=sys.stderr,
+    )
+
+    all_results = results + [v for v in screener_forecasts.values() if v is not None]
+    stale_count = sum(1 for r in all_results if r.get("stale"))
+    gap_warning_count = sum(1 for r in all_results if r.get("baseline_gap_warning"))
+    unreliable_count = sum(1 for r in all_results if r.get("unreliable"))
+    high_variance_count = sum(1 for r in all_results if r.get("high_variance"))
+    print(
+        f"[daily_forecast] TROUBLESHOOT SUMMARY: {len(all_results)} tickers processed -- "
+        f"{stale_count} with stale data (> 3 trading days old, Kronos skipped), "
+        f"{gap_warning_count} with a >5% baseline gap (Kronos baseline vs live market price), "
+        f"{unreliable_count} unreliable (predicted change > 15%), "
+        f"{high_variance_count} with high variance (> 3% std dev across {SAMPLE_RUNS} runs)",
         file=sys.stderr,
     )
 
