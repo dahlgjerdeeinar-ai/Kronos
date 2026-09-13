@@ -12,6 +12,7 @@ if not KRONOS_DIR.exists() and KRONOS_ZIP.exists():
         zf.extractall(ROOT)
 
 sys.path.insert(0, str(KRONOS_DIR))
+import numpy as np
 import yfinance as yf
 import pandas as pd
 from datetime import datetime
@@ -22,6 +23,101 @@ TICKERS = ["STB.OL", "TEL.OL", "EQNR.OL", "NOVO-B.CO"]
 # Suffix probe order for mapping bare screener symbols (e.g. "BIOMAR") to a
 # tradable yfinance ticker: Denmark, Sweden, Finland, Norway.
 NORDIC_SUFFIXES = [".CO", ".ST", ".HE", ".OL"]
+
+# Run predictor.predict() this many times per ticker and average the
+# resulting close prices -- pure inference-time variance reduction (Kronos
+# samples autoregressively), no change to the model itself.
+SAMPLE_RUNS = 3
+
+# Mirrors KronosPredictor(..., max_context=512) below. The Kronos paper's
+# own example (examples/prediction_example.py) uses lookback=400 against a
+# max_context=512 predictor -- i.e. as much history as is reasonably
+# available, capped at max_context. We cap at the same 512 and use however
+# much of it yfinance actually returns.
+MAX_LOOKBACK = 512
+
+GAP_WARNING_THRESHOLD = 0.5  # flag a >50% single-day close-to-close move
+
+
+def validate_input_data(df, ticker):
+    """Sanity-checks the OHLCV window about to be handed to Kronos: no NaNs,
+    no zero-volume days, no single-day 50%+ price gaps (a classic sign of
+    unadjusted splits or bad data). Purely diagnostic -- logs to stderr and
+    never blocks a forecast, since yfinance's auto_adjust=True already
+    handles real splits/dividends upstream."""
+    warnings = []
+
+    nan_counts = df[["open", "high", "low", "close", "volume"]].isna().sum()
+    if nan_counts.any():
+        bad = {k: int(v) for k, v in nan_counts[nan_counts > 0].items()}
+        warnings.append(f"{ticker}: NaN values present -- {bad}")
+
+    zero_volume_days = int((df["volume"] == 0).sum())
+    if zero_volume_days:
+        warnings.append(f"{ticker}: {zero_volume_days} day(s) with zero volume")
+
+    pct_change = df["close"].pct_change().abs()
+    gap_mask = pct_change > GAP_WARNING_THRESHOLD
+    if gap_mask.any():
+        gap_dates = df.loc[gap_mask, "timestamps"].dt.strftime("%Y-%m-%d").tolist()
+        warnings.append(
+            f"{ticker}: {int(gap_mask.sum())} day(s) with a >{GAP_WARNING_THRESHOLD*100:.0f}% "
+            f"close-to-close gap on {gap_dates}"
+        )
+
+    for w in warnings:
+        print(f"[daily_forecast] DATA QUALITY WARNING: {w}", file=sys.stderr)
+    return warnings
+
+
+def ensure_naive_timestamps(series, label, ticker):
+    """Kronos's calc_time_stamps() (model/kronos.py) calls
+    x_timestamp.dt.minute/.dt.hour/etc, which requires a pandas Series of
+    datetime64 dtype -- not a raw DatetimeIndex, which has no .dt accessor.
+    We already pass Series everywhere (matching the official example), so
+    this only guards against yfinance occasionally returning a
+    timezone-aware index: tz-aware and tz-naive stamps mixed together would
+    make hour/day arithmetic inconsistent between x_timestamp and
+    y_timestamp, so strip tz info if present and log it."""
+    series = pd.to_datetime(series)
+    tz = getattr(series.dt, "tz", None)
+    if tz is not None:
+        print(
+            f"[daily_forecast] TIMESTAMP WARNING: {ticker} {label} was timezone-aware "
+            f"({tz}) -- converted to naive for Kronos compatibility",
+            file=sys.stderr,
+        )
+        series = series.dt.tz_localize(None)
+    return series
+
+
+def print_kronos_usage_analysis():
+    """Static comparison against Kronos-master/examples/prediction_example.py
+    and model/kronos.py -- doesn't depend on any runtime data, so it's
+    printed once per run rather than per ticker."""
+    lines = [
+        "=== KRONOS USAGE ANALYSIS (vs examples/prediction_example.py) ===",
+        "Parameters: T=1.0 (match), top_p=0.9 (match), top_k=0/default (match), "
+        "sample_count=1 per call (match; SAMPLE_RUNS averages multiple such calls "
+        "externally, not via Kronos's own sample_count), max_context=512 (match).",
+        "pred_len=5 here vs 120 in the example -- expected difference, the example's "
+        "is arbitrary for its own intraday dataset and has no bearing on correctness.",
+        "Input columns: ['open','high','low','close','volume'] passed. KronosPredictor "
+        "only strictly requires price_cols=['open','high','low','close']; 'volume' is "
+        "optional (defaults to 0.0). We omit 'amount' explicitly, but "
+        "KronosPredictor.predict() auto-derives amount = volume * mean(price_cols) "
+        "whenever volume is present and amount is not (model/kronos.py) -- exactly "
+        "what we would compute ourselves, so this is not a gap.",
+        "x_timestamp / y_timestamp: both passed as pandas Series of datetime64, "
+        "matching the example -- calc_time_stamps() calls x_timestamp.dt.<attr>, "
+        "which requires a Series (a raw DatetimeIndex has no .dt accessor and would "
+        "raise). Per-ticker timezone-naive check logged below.",
+        f"Lookback: MAX_LOOKBACK={MAX_LOOKBACK} (mirrors max_context), using "
+        "df.tail(lookback) -- most recent data, not df.head(). Per-ticker lookback "
+        "actually used (bounded by however much history yfinance returns) logged below.",
+    ]
+    for line in lines:
+        print(f"[daily_forecast] {line}", file=sys.stderr)
 
 
 def get_valuation_label(ev_ebitda):
@@ -66,7 +162,10 @@ def resolve_ticker(symbol):
 
 def forecast_ticker(predictor, ticker, future_dates):
     try:
-        df = yf.download(ticker, period="6mo", interval="1d", auto_adjust=True, progress=False)
+        # 3y (vs the previous 6mo) so there's enough history to actually use
+        # up to MAX_LOOKBACK=512 days of context, per the Kronos paper's
+        # recommendation to use as much of max_context as is available.
+        df = yf.download(ticker, period="3y", interval="1d", auto_adjust=True, progress=False)
     except Exception:
         return None
     if df.empty:
@@ -92,14 +191,38 @@ def forecast_ticker(predictor, ticker, future_dates):
                 file=sys.stderr,
             )
 
-    recent_df = df.tail(100).reset_index(drop=True)
+    lookback = min(MAX_LOOKBACK, len(df))
+    print(
+        f"[daily_forecast] ANALYSIS {ticker}: lookback={lookback} "
+        f"(of {len(df)} trading days downloaded, capped at MAX_LOOKBACK={MAX_LOOKBACK})",
+        file=sys.stderr,
+    )
+    recent_df = df.tail(lookback).reset_index(drop=True)  # most recent data, not df.head()
     x_df = recent_df[["open", "high", "low", "close", "volume"]]
-    x_timestamp = recent_df["timestamps"]
-    y_timestamp = pd.Series(future_dates)
 
-    pred_df = predictor.predict(
-        df=x_df, x_timestamp=x_timestamp, y_timestamp=y_timestamp,
-        pred_len=5, T=1.0, top_p=0.9, sample_count=1, verbose=False,
+    validate_input_data(recent_df, ticker)
+
+    x_timestamp = ensure_naive_timestamps(recent_df["timestamps"], "x_timestamp", ticker)
+    y_timestamp = ensure_naive_timestamps(pd.Series(future_dates), "y_timestamp", ticker)
+
+    # Run inference SAMPLE_RUNS times and average the close-price path across
+    # runs -- Kronos samples autoregressively (T/top_p), so repeated calls on
+    # identical input vary; averaging reduces that variance without touching
+    # the model. Reports the per-day std dev across runs as a variance signal.
+    run_closes = []
+    for _ in range(SAMPLE_RUNS):
+        run_df = predictor.predict(
+            df=x_df, x_timestamp=x_timestamp, y_timestamp=y_timestamp,
+            pred_len=5, T=1.0, top_p=0.9, sample_count=1, verbose=False,
+        )
+        run_closes.append(run_df["close"].to_numpy(dtype=float))
+    runs_array = np.array(run_closes)  # shape (SAMPLE_RUNS, 5)
+    daily_prices = runs_array.mean(axis=0).tolist()
+    daily_prices_std = runs_array.std(axis=0).tolist()
+    print(
+        f"[daily_forecast] ANALYSIS {ticker}: {SAMPLE_RUNS}-run std dev per day = "
+        f"{[round(s, 4) for s in daily_prices_std]}, mean std = {np.mean(daily_prices_std):.4f}",
+        file=sys.stderr,
     )
 
     ticker_obj = yf.Ticker(ticker)
@@ -119,8 +242,8 @@ def forecast_ticker(predictor, ticker, future_dates):
         else None
     )
 
-    daily_prices = [float(p) for p in pred_df["close"].tolist()]
-    avg_forecast = float(pred_df["close"].mean())
+    daily_prices = [float(p) for p in daily_prices]
+    avg_forecast = float(np.mean(daily_prices))
     change_pct = ((avg_forecast - current_price) / current_price) * 100
 
     signal = "BUY" if change_pct > 2 else ("SELL" if change_pct < -4 else "HOLD")
@@ -242,6 +365,8 @@ def compute_daily_errors(key, history, actual_prices):
 
 
 def run_forecast(screener_symbols=None):
+    print_kronos_usage_analysis()
+
     tokenizer = KronosTokenizer.from_pretrained("NeoQuasar/Kronos-Tokenizer-base")
     model = Kronos.from_pretrained("NeoQuasar/Kronos-small")
     predictor = KronosPredictor(model, tokenizer, max_context=512)
@@ -291,6 +416,15 @@ def run_forecast(screener_symbols=None):
             attach_accuracy(symbol, result)
 
     save_forecast_history(forecast_history)
+
+    screener_successes = sum(1 for v in screener_forecasts.values() if v is not None)
+    print(
+        f"[daily_forecast] ANALYSIS summary: {len(results)}/{len(TICKERS)} portfolio tickers "
+        f"and {screener_successes}/{len(screener_symbols or [])} screener candidates forecasted "
+        f"successfully, each averaged over SAMPLE_RUNS={SAMPLE_RUNS} runs (see per-ticker lines above "
+        "for lookback/variance/data-quality detail).",
+        file=sys.stderr,
+    )
 
     return {"dates": dates, "tickers": results, "screener_forecasts": screener_forecasts}
 
