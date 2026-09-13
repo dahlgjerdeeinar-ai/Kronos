@@ -246,17 +246,10 @@ def run_forecast(screener_symbols=None):
     model = Kronos.from_pretrained("NeoQuasar/Kronos-small")
     predictor = KronosPredictor(model, tokenizer, max_context=512)
 
-    # Next 5 trading days from today, inclusive of today when today is
-    # itself a trading day. The workflow runs at 08:00 CEST, before market
-    # open, so x_df's last close is yesterday's (or Friday's, on a Monday
-    # run) -- today has not closed yet and belongs in the forecast horizon.
-    # pd.bdate_range rolls a weekend/holiday start forward to the next
-    # business day automatically, so this is correct however the script is
-    # triggered: periods=6 followed by [1:] used to unconditionally drop
-    # the first business day *on/after* today, which is wrong whenever
-    # today itself isn't a trading day (it silently skipped the real next
-    # trading day instead of just dropping "today").
-    future_dates = pd.bdate_range(start=datetime.today(), periods=5)
+    # Always the next 5 trading days starting tomorrow, regardless of what
+    # day it is or whether today itself is a trading day. bdate_range rolls
+    # a weekend/holiday start forward to the next business day automatically.
+    future_dates = pd.bdate_range(start=pd.Timestamp.today() + pd.Timedelta(days=1), periods=5)
     dates = [d.strftime("%Y-%m-%d") for d in future_dates]
 
     results = []

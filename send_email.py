@@ -128,36 +128,24 @@ PORTFOLIO_ROW = """
   <td style="padding:10px 8px;text-align:right;color:#888;font-size:11px;">EV/E {ev_ebitda} &middot; ROIC {roic}</td>
 </tr>"""
 
-MOVEMENT_HEADER_ROW = """
-<tr style="font-size:10px;color:#888;font-family:-apple-system,sans-serif;">
-  <td style="padding:4px 6px;">Dato</td>
-  <td style="padding:4px 6px;text-align:right;">Kronos-pris</td>
-  <td style="padding:4px 6px;text-align:right;">Kronos %</td>
-  <td style="padding:4px 6px;text-align:right;">Faktisk</td>
-  <td style="padding:4px 6px;text-align:right;">Avvik</td>
-</tr>"""
+MOVEMENT_HEADER_DATE_CELL = """<td style="padding:4px 4px;text-align:right;font-family:-apple-system,sans-serif;font-size:9px;color:#888;white-space:nowrap;">{date}</td>"""
+MOVEMENT_HEADER_FORECAST_DATE_CELL = """<td style="padding:4px 4px;text-align:right;font-family:-apple-system,sans-serif;font-size:9px;font-style:italic;color:#aaa;white-space:nowrap;">{date}</td>"""
 
-MOVEMENT_SYMBOL_HEADER = """
-<tr>
-  <td colspan="5" style="padding:14px 6px 0;font-family:Georgia,serif;font-size:13px;font-weight:bold;color:#0a0f0a;">{symbol}</td>
-</tr>
-<tr>
-  <td colspan="5" style="padding:0 6px 6px;font-family:-apple-system,sans-serif;font-size:10px;color:#888;">{reason}</td>
-</tr>"""
-
-MOVEMENT_DAY_ROW = """
+MOVEMENT_ROW = """
 <tr style="border-top:1px solid #e8e4dc;">
-  <td style="padding:6px 6px;font-family:-apple-system,sans-serif;font-size:11px;">{date}</td>
-  <td style="padding:6px 6px;text-align:right;font-family:-apple-system,sans-serif;font-size:11px;">{predicted}</td>
-  <td style="padding:6px 6px;text-align:right;font-family:-apple-system,sans-serif;font-size:11px;">{change_pct}</td>
-  <td style="padding:6px 6px;text-align:right;font-family:-apple-system,sans-serif;font-size:11px;">{actual}</td>
-  <td style="padding:6px 6px;text-align:right;color:{diff_color};font-weight:bold;font-family:-apple-system,sans-serif;font-size:11px;">{diff_pct}</td>
+  <td style="padding:8px 6px;vertical-align:top;">
+    <span style="font-family:Georgia,serif;font-size:13px;font-weight:bold;color:#0a0f0a;">{symbol}</span><br>
+    <span style="font-family:-apple-system,sans-serif;font-size:11px;color:#999;">{reason}</span>
+  </td>
+  {date_cells}
+  <td style="padding:8px 4px;text-align:right;font-family:-apple-system,sans-serif;font-size:10px;font-style:italic;color:#555;white-space:nowrap;">{mae}</td>
 </tr>"""
 
-MOVEMENT_MAE_ROW = """
-<tr style="border-top:1px solid #222;">
-  <td colspan="5" style="padding:6px 6px;font-family:-apple-system,sans-serif;font-size:11px;font-style:italic;color:#555;">Kronos MAE (siste 5 dager): {mae}</td>
-</tr>"""
+MOVEMENT_HISTORICAL_CELL = """<td style="padding:6px 4px;text-align:right;font-family:-apple-system,sans-serif;font-size:10px;white-space:nowrap;">{predicted}<br><span style="font-size:9px;color:{diff_color};">{actual}</span></td>"""
+
+MOVEMENT_FORECAST_CELL = """<td style="padding:6px 4px;text-align:right;font-family:-apple-system,sans-serif;font-size:10px;font-style:italic;color:#999;white-space:nowrap;">{predicted}</td>"""
+
+MOVEMENT_EMPTY_CELL = """<td style="padding:6px 4px;text-align:right;font-family:-apple-system,sans-serif;font-size:10px;color:#ccc;">&mdash;</td>"""
 
 SIGNAL_COLOR_MAP = {"BUY": "#1a7a1a", "SELL": "#cc2222", "HOLD": "#b8860b"}
 
@@ -467,58 +455,88 @@ def build_repeated_section(screener_history, forecast_history, screener_forecast
     return REPEATED_SECTION_WRAPPER.format(rows="".join(rows_html))
 
 
-def build_movement_block(symbol, result, reason):
-    """One symbol's block: the last 5 real trading days (predicted-vs-actual,
-    colored by how far off Kronos was) followed by the current 5-day-ahead
-    forecast (no actual yet -- future dates show "-"), then a MAE summary
-    row for that symbol."""
-    rows = [MOVEMENT_SYMBOL_HEADER.format(symbol=symbol, reason=reason)]
+def build_movement_header(historical_dates, future_dates):
+    cells = ["<td style='padding:4px 6px;font-family:-apple-system,sans-serif;font-size:10px;color:#888;'>Ticker</td>"]
+    cells += [MOVEMENT_HEADER_DATE_CELL.format(date=d) for d in historical_dates]
+    cells += [MOVEMENT_HEADER_FORECAST_DATE_CELL.format(date=d) for d in future_dates]
+    cells.append("<td style='padding:4px 4px;text-align:right;font-family:-apple-system,sans-serif;font-size:9px;color:#888;'>MAE</td>")
+    return "<tr>" + "".join(cells) + "</tr>"
 
-    for e in sorted(result.get("daily_errors", []), key=lambda e: e["date"]):
-        diff_pct = e.get("error_pct")
-        rows.append(MOVEMENT_DAY_ROW.format(
-            date=e["date"],
+
+def build_movement_row(symbol, result, reason, historical_dates, future_dates):
+    """One row per symbol: historical columns show Kronos's predicted price
+    for that date alongside the actual close (colored by how far off it
+    was); future columns show only the pending forecast price, styled
+    lighter/italic to mark it as not-yet-happened; a trailing MAE column
+    summarizes the last 5 real trading days for that symbol."""
+    errors_by_date = {e["date"]: e for e in result.get("daily_errors", [])}
+    predicted_by_date = {p["date"]: p for p in result.get("predicted_prices", [])}
+
+    date_cells = []
+    for d in historical_dates:
+        e = errors_by_date.get(d)
+        if e is None:
+            date_cells.append(MOVEMENT_EMPTY_CELL)
+            continue
+        date_cells.append(MOVEMENT_HISTORICAL_CELL.format(
             predicted=fmt_num(e.get("predicted"), 2),
-            change_pct=fmt_signed_pct(e.get("change_pct")),
             actual=fmt_num(e.get("actual"), 2),
-            diff_color=diff_color(diff_pct),
-            diff_pct=fmt_pct(diff_pct),
+            diff_color=diff_color(e.get("error_pct")),
         ))
-
-    for p in result.get("predicted_prices", []):
-        rows.append(MOVEMENT_DAY_ROW.format(
-            date=p["date"],
-            predicted=fmt_num(p.get("price"), 2),
-            change_pct=fmt_signed_pct(p.get("change_pct")),
-            actual="—",
-            diff_color=diff_color(None),
-            diff_pct="—",
-        ))
+    for d in future_dates:
+        p = predicted_by_date.get(d)
+        if p is None:
+            date_cells.append(MOVEMENT_EMPTY_CELL)
+            continue
+        date_cells.append(MOVEMENT_FORECAST_CELL.format(predicted=fmt_num(p.get("price"), 2)))
 
     mae = result.get("mean_absolute_error_pct")
-    rows.append(MOVEMENT_MAE_ROW.format(mae=fmt_pct(mae) if mae is not None else "N/A (ingen historikk enda)"))
-    return "".join(rows)
+    return MOVEMENT_ROW.format(
+        symbol=symbol,
+        reason=reason,
+        date_cells="".join(date_cells),
+        mae=fmt_pct(mae) if mae is not None else "N/A",
+    )
 
 
 def build_movement_rows(tickers, screener_rows, screener_forecasts):
-    blocks = [MOVEMENT_HEADER_ROW]
+    screener_results = [
+        (row, screener_forecasts.get(row["symbol"]))
+        for row in screener_rows
+        if screener_forecasts.get(row["symbol"])
+    ]
+    all_results = list(tickers) + [forecast for _, forecast in screener_results]
+
+    # Historical columns: the union of every symbol's matured dates (Nordic
+    # exchanges usually share the same trading calendar, but this stays
+    # correct even if one doesn't -- a symbol missing a date just shows "-"
+    # for it). Future columns: the 5-day forecast horizon, identical for
+    # every symbol since it's computed once per run and shared by all of
+    # them, so the first non-empty one is representative.
+    historical_dates = sorted({e["date"] for r in all_results for e in r.get("daily_errors", [])})
+    future_dates = next((
+        [p["date"] for p in r["predicted_prices"]]
+        for r in all_results if r.get("predicted_prices")
+    ), [])
+
+    blocks = [build_movement_header(historical_dates, future_dates)]
+
     for t in tickers:
         roic_pct = t["roic"] * 100 if t.get("roic") is not None else None
         reason = (
             f"EV/EBITDA: {fmt_num(t.get('ev_ebitda'))} &middot; "
             f"ROIC: {fmt_pct(roic_pct)} &middot; Signal: {t.get('signal', 'N/A')}"
         )
-        blocks.append(build_movement_block(t["ticker"], t, reason))
-    for row in screener_rows:
-        forecast = screener_forecasts.get(row["symbol"])
-        if not forecast:
-            continue
+        blocks.append(build_movement_row(t["ticker"], t, reason, historical_dates, future_dates))
+
+    for row, forecast in screener_results:
         reason = (
             f"Quant: {fmt_num(row.get('quant_score'), 0)} &middot; "
             f"EV/E: {fmt_num(row.get('ev_ebitda'))} &middot; "
             f"6M mom: {fmt_signed_pct(row.get('momentum_6m'))}"
         )
-        blocks.append(build_movement_block(row["symbol"], forecast, reason))
+        blocks.append(build_movement_row(row["symbol"], forecast, reason, historical_dates, future_dates))
+
     return "".join(blocks)
 
 
