@@ -178,17 +178,6 @@ def forecast_ticker(predictor, ticker, future_dates):
     df["timestamps"] = pd.to_datetime(df.index)
     df = df.reset_index(drop=True)
 
-    last_date = df["timestamps"].max()
-    today = pd.Timestamp(datetime.today().date())
-    if last_date <= today:
-        stale_trading_days = len(pd.bdate_range(start=last_date, end=today)) - 1
-        if stale_trading_days > 3:
-            print(
-                f"[daily_forecast] WARNING: Data for {ticker} is stale — last date: "
-                f"{last_date.date()}. Forecasts may be unreliable.",
-                file=sys.stderr,
-            )
-
     lookback = min(MAX_LOOKBACK, len(df))
     print(
         f"[daily_forecast] ANALYSIS {ticker}: lookback={lookback} "
@@ -197,6 +186,28 @@ def forecast_ticker(predictor, ticker, future_dates):
     )
     recent_df = df.tail(lookback).reset_index(drop=True)  # most recent data, not df.head()
     x_df = recent_df[["open", "high", "low", "close", "volume"]]
+
+    # Freshness check on the exact data Kronos will see (x_df's last row),
+    # not just the raw download -- x_df.index itself is a plain 0..N range
+    # after reset_index, so the real date lives in recent_df["timestamps"].
+    last_date = recent_df["timestamps"].iloc[-1]
+    today = pd.Timestamp(datetime.today().date())
+    stale_trading_days = len(pd.bdate_range(start=last_date, end=today)) - 1 if last_date <= today else 0
+
+    if stale_trading_days > 5:
+        print(
+            f"[daily_forecast] STALE DATA WARNING: {ticker} last available date "
+            f"{last_date.date()} is {stale_trading_days} trading days old (> 5) -- "
+            "skipping Kronos for this ticker rather than producing a misleading forecast",
+            file=sys.stderr,
+        )
+        return None
+    elif stale_trading_days > 3:
+        print(
+            f"[daily_forecast] WARNING: Data for {ticker} is stale — last date: "
+            f"{last_date.date()}. Forecasts may be unreliable.",
+            file=sys.stderr,
+        )
 
     validate_input_data(recent_df, ticker)
 
@@ -244,11 +255,18 @@ def forecast_ticker(predictor, ticker, future_dates):
     avg_forecast = float(np.mean(daily_prices))
     change_pct = ((avg_forecast - current_price) / current_price) * 100
 
-    if abs(change_pct) > 10:
+    if abs(change_pct) > 15:
+        kronos_baseline = float(recent_df["close"].iloc[-1])
         print(
-            f"[daily_forecast] DEBUG: {ticker} predicted change {change_pct:+.1f}% exceeds 10% -- "
-            f"last 3 rows of input data handed to Kronos:\n"
-            f"{recent_df[['timestamps', 'open', 'high', 'low', 'close', 'volume']].tail(3).to_string(index=False)}",
+            f"[daily_forecast] WARNING: {ticker} predicted change {change_pct:+.1f}% exceeds 15% -- "
+            f"dumping diagnostics to check for a baseline mismatch:\n"
+            f"  current_price used: {current_price}\n"
+            f"  Kronos baseline (last row of x_df, close): {kronos_baseline}\n"
+            f"  last 5 rows of x_df:\n"
+            f"{recent_df[['timestamps', 'open', 'high', 'low', 'close', 'volume']].tail(5).to_string(index=False)}\n"
+            f"  individual run predictions (close, {SAMPLE_RUNS} runs x 5 days):\n"
+            f"{runs_array}\n"
+            f"  averaged daily_prices used: {daily_prices}",
             file=sys.stderr,
         )
 

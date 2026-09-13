@@ -123,7 +123,7 @@ PORTFOLIO_ROW = """
 <tr style="border-top:1px solid #e8e4dc;">
   <td style="padding:10px 0;font-weight:600;">{ticker}</td>
   <td style="padding:10px 8px;color:#888;">{current} &rarr; {forecast}
-    <br><span style="font-size:10px;color:#aaa;">Yesterday close (Kronos baseline): {current} | Today open: {today_open} | Gap: {gap_pct}</span>
+    <br><span style="font-size:10px;color:#aaa;">Yesterday close (Kronos baseline): {current} | Today open: {today_open} (market gap: {gap_pct})</span>
   </td>
   <td style="padding:10px 8px;text-align:center;color:{signal_color};font-weight:bold;">&bull; {signal}</td>
   <td style="padding:10px 8px;text-align:right;color:{signal_color};font-weight:bold;">{change_pct}</td>
@@ -615,7 +615,7 @@ def build_text_body(screener_rows, forecast_data):
         )
         lines.append(
             f"    Yesterday close (Kronos baseline): {fmt_num(t.get('current_price'), 2)} | "
-            f"Today open: {fmt_num(t.get('today_open'), 2)} | Gap: {fmt_signed_pct(t.get('gap_pct'))} | "
+            f"Today open: {fmt_num(t.get('today_open'), 2)} (market gap: {fmt_signed_pct(t.get('gap_pct'))}) | "
             f"MAE (last 5 days): {fmt_pct(mae) if mae is not None else 'N/A'}"
         )
     return "\n".join(lines)
