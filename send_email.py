@@ -113,7 +113,7 @@ EMAIL_TEMPLATE = """<!DOCTYPE html>
 SCREENER_ROW = """
 <tr style="border-top:1px solid #e8e4dc;">
   <td style="padding:10px 0;"><strong>{name}</strong><br><span style="font-size:11px;color:#888;">{sector} &middot; {momentum_6m} 6M</span></td>
-  <td style="padding:10px 8px;text-align:center;"><span style="background:#0a0f0a;color:{score_color};padding:3px 8px;border-radius:4px;font-size:12px;font-family:'Courier New',monospace;">{quant_score}</span></td>
+  <td style="padding:10px 8px;text-align:center;"><span style="background:#0a0f0a;color:#ffffff;padding:3px 8px;border-radius:4px;font-size:12px;font-family:'Courier New',monospace;">{quant_score}</span></td>
   <td style="padding:10px 8px;text-align:center;color:#555;">{ev_ebitda}</td>
   <td style="padding:10px 8px;text-align:center;color:{signal_color};font-weight:bold;font-family:-apple-system,sans-serif;">&bull; {kronos_signal}</td>
   <td style="padding:10px 8px;text-align:right;color:{signal_color};font-weight:bold;font-family:-apple-system,sans-serif;">{change_pct}</td>
@@ -212,16 +212,6 @@ def run_script(name, args=None, echo_stderr=False):
     return result.stdout.strip()
 
 
-def score_color(quant_score):
-    if quant_score is None:
-        return "#888"
-    if quant_score >= 80:
-        return "#00ff41"
-    if quant_score >= 60:
-        return "#888800"
-    return "#888"
-
-
 def signal_color(label):
     return SIGNAL_COLOR_MAP.get(label, "#888")  # covers "N/A" and anything unexpected
 
@@ -262,7 +252,6 @@ def build_screener_rows(rows, screener_forecasts):
             name=row["name"],
             sector=row.get("sector") or "N/A",
             momentum_6m=fmt_signed_pct(row.get("momentum_6m")),
-            score_color=score_color(quant_score),
             quant_score=fmt_num(quant_score, 0),
             ev_ebitda=fmt_num(row.get("ev_ebitda")),
             signal_color=signal_color(kf["signal"]),
