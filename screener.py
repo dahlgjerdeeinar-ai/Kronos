@@ -80,7 +80,7 @@ def update_screener_history(results):
 
     today_str = date.today().isoformat()
     history = [entry for entry in history if entry.get("date") != today_str]
-    candidates = [{"symbol": r["symbol"], "quant_score": r["quant_score"]} for r in results]
+    candidates = [{"symbol": r["symbol"], "name": r["name"], "quant_score": r["quant_score"]} for r in results]
     history.append({"date": today_str, "candidates": candidates})
     history = history[-MAX_SCREENER_HISTORY_DAYS:]
     SCREENER_HISTORY_PATH.write_text(json.dumps(history))

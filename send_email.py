@@ -75,9 +75,9 @@ EMAIL_TEMPLATE = """<!DOCTYPE html>
       <div style="font-size:13px;color:#333;line-height:1.8;font-style:italic;">{market_analysis}</div>
     </div>
 
-    <div style="margin-top:24px;background:#f0ede6;border-left:3px solid #0a0f0a;padding:16px 20px;">
-      <div style="font-family:-apple-system,sans-serif;font-size:10px;color:#555;letter-spacing:2px;text-transform:uppercase;margin-bottom:10px;">Om systemet</div>
-      <div style="font-family:-apple-system,sans-serif;font-size:12px;color:#444;line-height:1.8;">
+    <details style="margin-top:24px;background:#f0ede6;border-left:3px solid #0a0f0a;padding:16px 20px;">
+      <summary style="cursor:pointer;font-family:-apple-system,sans-serif;font-size:10px;color:#555;letter-spacing:2px;text-transform:uppercase;">Om systemet &hellip;</summary>
+      <div style="font-family:-apple-system,sans-serif;font-size:12px;color:#444;line-height:1.8;margin-top:10px;">
         <strong>Screening:</strong> 1400+ nordiske aksjer screenes daglig via lseffer Nordic Stock Screener.
         Aksjer rangeres etter en 12-faktor kvant-modell: Verdi (Earnings Yield, FCF Yield, P/B),
         Kvalitet (Piotroski F-Score, Gross Margin), Momentum (6M, 12M, 52W High),
@@ -95,7 +95,7 @@ EMAIL_TEMPLATE = """<!DOCTYPE html>
         Forsvar) er merket &#9888;&#65039; da Kronos ikke tar hensyn til geopolitiske hendelser.<br><br>
         <em>Dette er ikke finansiell rådgivning. Alle investeringsbeslutninger tas på eget ansvar.</em>
       </div>
-    </div>
+    </details>
 
   </div>
 
@@ -165,7 +165,7 @@ REPEATED_SECTION_WRAPPER = """
 
 REPEATED_SYMBOL_HEADER = """
 <tr>
-  <td colspan="6" style="padding:14px 6px 4px;font-family:Georgia,serif;font-size:13px;font-weight:bold;color:#0a0f0a;">{symbol} <span style="font-family:-apple-system,sans-serif;font-size:10px;font-weight:normal;color:#888;">&middot; quant score (siste): {quant_score}</span></td>
+  <td colspan="6" style="padding:14px 6px 4px;font-family:Georgia,serif;font-size:13px;font-weight:bold;color:#0a0f0a;">{name} <span style="font-family:-apple-system,sans-serif;font-size:11px;font-weight:normal;color:#888;">({symbol})</span> <span style="font-family:-apple-system,sans-serif;font-size:10px;font-weight:normal;color:#888;">&middot; quant score (siste): {quant_score}</span></td>
 </tr>"""
 
 REPEATED_ROW = """
@@ -414,9 +414,12 @@ def build_repeated_section(screener_history, forecast_history, screener_forecast
         return ""
 
     latest_quant_score = {}
+    latest_name = {}
     for entry in screener_history:
         for c in entry.get("candidates", []):
             latest_quant_score[c["symbol"]] = c.get("quant_score")
+            if c.get("name"):
+                latest_name[c["symbol"]] = c["name"]
 
     rows_html = []
     for symbol in sorted(repeated):
@@ -424,6 +427,7 @@ def build_repeated_section(screener_history, forecast_history, screener_forecast
         actual_closes = fetch_recent_closes(yahoo_ticker) if yahoo_ticker else {}
         rows_html.append(REPEATED_SYMBOL_HEADER.format(
             symbol=symbol,
+            name=latest_name.get(symbol, symbol),
             quant_score=fmt_num(latest_quant_score.get(symbol), 0),
         ))
         for entry in screener_history:
