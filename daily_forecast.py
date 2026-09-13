@@ -378,6 +378,14 @@ def forecast_ticker(predictor, ticker, future_dates):
 
     signal = "UNRELIABLE" if unreliable else ("BUY" if change_pct > 2 else ("SELL" if change_pct < -4 else "HOLD"))
 
+    if unreliable:
+        print(
+            f"[daily_forecast] UNRELIABLE CAP APPLIED: {ticker} change_pct={change_pct:+.2f}% "
+            f"(abs > 15%) -- signal forced to UNRELIABLE (would otherwise have been "
+            f"{'BUY' if change_pct > 2 else ('SELL' if change_pct < -4 else 'HOLD')})",
+            file=sys.stderr,
+        )
+
     ev_ebitda = info.get("enterpriseToEbitda")
     roic = info.get("returnOnEquity")  # proxy for ROIC when true ROIC isn't exposed by yfinance
     valuation_label = get_valuation_label(ev_ebitda)
