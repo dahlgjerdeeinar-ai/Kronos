@@ -306,30 +306,34 @@ def compute_beta_ivol(stock_hist, market_hist):
     return float(beta), ivol
 
 
-def fetch_debt_equity(yahoo_ticker):
+def fetch_yahoo_info(yahoo_ticker):
+    """Single .info fetch per candidate, shared by fetch_debt_equity() and
+    fetch_sector() -- previously each made its own separate yf.Ticker(...).info
+    call for the same ticker in the same enrichment-loop iteration."""
     if not yahoo_ticker:
-        return None
+        return {}
     try:
-        return yf.Ticker(yahoo_ticker).info.get("debtToEquity")
+        return yf.Ticker(yahoo_ticker).info or {}
     except Exception:
-        return None
+        return {}
 
 
-def fetch_sector(yahoo_ticker, db_sector):
+def fetch_debt_equity(info):
+    return info.get("debtToEquity")
+
+
+def fetch_sector(yahoo_ticker, db_sector, info):
     """Fallback chain: yfinance info.sector -> fast_info -> info.industry ->
     the lseffer DB's own sector value (even if empty, rather than "N/A").
     Returns (sector_value, source_label) so callers can tally where each
-    stock's sector actually came from."""
+    stock's sector actually came from. `info` is the shared fetch_yahoo_info()
+    result -- only fast_info still needs its own separate call, since it's a
+    genuinely different yfinance endpoint."""
+    sector = info.get("sector")
+    if sector:
+        return sector, "yfinance info.sector"
+
     if yahoo_ticker:
-        try:
-            info = yf.Ticker(yahoo_ticker).info
-        except Exception:
-            info = {}
-
-        sector = info.get("sector")
-        if sector:
-            return sector, "yfinance info.sector"
-
         try:
             fast_info = yf.Ticker(yahoo_ticker).fast_info
             fast_sector = fast_info.get("sector") if hasattr(fast_info, "get") else getattr(fast_info, "sector", None)
@@ -338,9 +342,9 @@ def fetch_sector(yahoo_ticker, db_sector):
         if fast_sector:
             return fast_sector, "yfinance fast_info"
 
-        industry = info.get("industry")
-        if industry:
-            return industry, "yfinance info.industry"
+    industry = info.get("industry")
+    if industry:
+        return industry, "yfinance info.industry"
 
     return db_sector, "lseffer DB (possibly empty)"
 
@@ -707,13 +711,15 @@ def run_screener():
     sector_source_counts = Counter()
     compatibility = {}
     for idx, row in top20.iterrows():
-        top20.at[idx, "debt_equity"] = fetch_debt_equity(row["yahoo_ticker"])
+        info = fetch_yahoo_info(row["yahoo_ticker"])
+
+        top20.at[idx, "debt_equity"] = fetch_debt_equity(info)
         stock_hist = ph_by_isin.get(row["isin"], pd.DataFrame(columns=["date", "close"]))
         beta, ivol = compute_beta_ivol(stock_hist, osebx_hist)
         top20.at[idx, "beta"] = beta
         top20.at[idx, "ivol"] = ivol
 
-        sector, source = fetch_sector(row["yahoo_ticker"], row["sector"])
+        sector, source = fetch_sector(row["yahoo_ticker"], row["sector"], info)
         top20.at[idx, "sector"] = sector
         sector_source_counts[source] += 1
 

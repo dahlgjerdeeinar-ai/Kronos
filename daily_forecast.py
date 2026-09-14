@@ -36,6 +36,13 @@ MAX_LOOKBACK = 400
 
 GAP_WARNING_THRESHOLD = 0.5  # flag a >50% single-day close-to-close move
 
+# Stocks with extreme trailing 12-month price momentum (e.g. a name up
+# 100%+ in a year) are exactly the kind Kronos's stochastic sampling tends
+# to produce wild, unstable forecasts for -- skip Kronos for them entirely
+# rather than let the >15% UNRELIABLE cap catch it after the fact.
+MOMENTUM_12M_SKIP_THRESHOLD = 60
+MOMENTUM_12M_TRADING_DAYS = 252
+
 
 def validate_input_data(df, ticker):
     """Sanity-checks the OHLCV window about to be handed to Kronos: no NaNs,
@@ -208,6 +215,75 @@ def build_stale_result(ticker, df, current_price, baseline_gap_warning):
         "baseline_gap_warning": baseline_gap_warning,
         "unreliable": False,
         "high_variance": False,
+        "extreme_momentum": False,
+    }
+
+
+def compute_momentum_12m(x_df):
+    """Trailing 12-month price momentum computed directly from the OHLCV
+    window about to be handed to Kronos -- distinct from screener.py's own
+    momentum_12m (a DB-price-history-driven quant factor); this one exists
+    purely as a pre-Kronos sanity gate. Returns None if x_df doesn't cover
+    a full 12 months (best-effort otherwise: falls back to the oldest row
+    available if there's less than 252 trading days of history)."""
+    if len(x_df) < 2:
+        return None
+    lookback_idx = max(0, len(x_df) - 1 - MOMENTUM_12M_TRADING_DAYS)
+    price_then = float(x_df["close"].iloc[lookback_idx])
+    price_now = float(x_df["close"].iloc[-1])
+    if not price_then:
+        return None
+    return (price_now - price_then) / price_then * 100
+
+
+def build_skip_result(ticker, df, current_price, baseline_gap_warning, momentum_12m):
+    """Extreme trailing 12-month momentum -- Kronos's stochastic sampling
+    tends to produce wild, unstable forecasts for names like this, so skip
+    it entirely rather than let the >15% UNRELIABLE cap catch it after the
+    fact. Mirrors build_stale_result's placeholder-result shape so
+    send_email.py needs no special-casing (signal_color() maps this
+    signal string to grey explicitly)."""
+    ticker_obj = yf.Ticker(ticker)
+    try:
+        info = ticker_obj.info
+    except Exception:
+        info = {}
+    today_open = fetch_today_open(ticker)
+    gap_pct = (
+        ((today_open - current_price) / current_price) * 100
+        if today_open is not None and current_price
+        else None
+    )
+    ev_ebitda = info.get("enterpriseToEbitda")
+    roic = info.get("returnOnEquity")
+    valuation_label = get_valuation_label(ev_ebitda)
+
+    actual_tail = df.tail(5)
+    actual_prices = [
+        {"date": ts.strftime("%Y-%m-%d"), "price": float(c)}
+        for ts, c in zip(actual_tail["timestamps"], actual_tail["close"])
+    ]
+
+    return {
+        "ticker": ticker,
+        "current_price": current_price,
+        "today_open": today_open,
+        "gap_pct": gap_pct,
+        "avg_forecast": None,
+        "change_pct": None,
+        "signal": "SKIP — extreme momentum, Kronos unreliable",
+        "ev_ebitda": ev_ebitda,
+        "valuation_label": valuation_label,
+        "roic": roic,
+        "daily_prices": [],
+        "predicted_prices": [],
+        "actual_prices": actual_prices,
+        "stale": False,
+        "baseline_gap_warning": baseline_gap_warning,
+        "unreliable": False,
+        "high_variance": False,
+        "extreme_momentum": True,
+        "momentum_12m": momentum_12m,
     }
 
 
@@ -298,6 +374,22 @@ def forecast_ticker(predictor, ticker, future_dates):
         )
         return build_stale_result(ticker, df, current_price, baseline_gap_warning)
 
+    momentum_12m = compute_momentum_12m(x_df)
+    print(
+        f"[daily_forecast] TROUBLESHOOT {ticker}: momentum_12m="
+        f"{'N/A' if momentum_12m is None else f'{momentum_12m:+.1f}%'} "
+        f"(skip threshold: abs > {MOMENTUM_12M_SKIP_THRESHOLD}%)",
+        file=sys.stderr,
+    )
+    if momentum_12m is not None and abs(momentum_12m) > MOMENTUM_12M_SKIP_THRESHOLD:
+        print(
+            f"[daily_forecast] EXTREME MOMENTUM SKIP: {ticker} 12-month momentum "
+            f"{momentum_12m:+.1f}% exceeds {MOMENTUM_12M_SKIP_THRESHOLD}% -- skipping Kronos, "
+            "its stochastic sampling tends to produce unstable forecasts for names like this",
+            file=sys.stderr,
+        )
+        return build_skip_result(ticker, df, current_price, baseline_gap_warning, momentum_12m)
+
     validate_input_data(recent_df, ticker)
 
     x_timestamp = ensure_naive_timestamps(recent_df["timestamps"], "x_timestamp", ticker)
@@ -327,16 +419,6 @@ def forecast_ticker(predictor, ticker, future_dates):
     high_variance = variance_pct > 3
 
     daily_prices = [float(p) for p in daily_prices_mean]
-
-    if ticker.upper().startswith("BULTEN"):
-        print(
-            f"[daily_forecast] DEBUG BULTEN: resolved ticker={ticker}\n"
-            f"  baseline current_price: {current_price}\n"
-            f"  last 5 rows of input data:\n"
-            f"{recent_df[['timestamps', 'open', 'high', 'low', 'close', 'volume']].tail(5).to_string(index=False)}\n"
-            f"  individual run predictions (close, {SAMPLE_RUNS} runs x 5 days):\n{runs_array}",
-            file=sys.stderr,
-        )
 
     ticker_obj = yf.Ticker(ticker)
     try:
@@ -427,6 +509,8 @@ def forecast_ticker(predictor, ticker, future_dates):
         "baseline_gap_warning": baseline_gap_warning,
         "unreliable": unreliable,
         "high_variance": high_variance,
+        "extreme_momentum": False,
+        "momentum_12m": momentum_12m,
     }
 
 
@@ -453,17 +537,27 @@ def record_forecast_snapshot(history, key, result, dates, snapshot_date):
     dates + predicted prices and the signal (per spec), plus change_pct and
     current_price -- the Kronos baseline for that day -- so a later lookup
     by symbol+date can render a forecast-vs-actual comparison without
-    needing to recompute or re-fetch anything."""
-    snapshot = {
+    needing to recompute or re-fetch anything.
+
+    Any existing entry for the same snapshot_date is replaced first -- the
+    workflow can run more than once on a given day (manual retriggers),
+    and without this the history filled up with same-day duplicates that
+    both wasted MAX_HISTORY_SNAPSHOTS slots and made the "freshest
+    snapshot wins" tie-break in compute_daily_errors ambiguous (Python's
+    sort is stable, so reverse=True does NOT reverse the relative order of
+    equal-date entries -- the oldest same-day run would win the tie, not
+    the newest)."""
+    existing = history.setdefault(key, [])
+    existing[:] = [s for s in existing if s.get("snapshot_date") != snapshot_date]
+    existing.append({
         "snapshot_date": snapshot_date,
         "dates": dates,
         "daily_prices": result["daily_prices"],
         "signal": result["signal"],
         "change_pct": result["change_pct"],
         "current_price": result["current_price"],
-    }
-    history.setdefault(key, []).append(snapshot)
-    history[key] = history[key][-MAX_HISTORY_SNAPSHOTS:]
+    })
+    history[key] = existing[-MAX_HISTORY_SNAPSHOTS:]
 
 
 def compute_daily_errors(key, history, actual_prices):
@@ -578,12 +672,15 @@ def run_forecast(screener_symbols=None):
     gap_warning_count = sum(1 for r in all_results if r.get("baseline_gap_warning"))
     unreliable_count = sum(1 for r in all_results if r.get("unreliable"))
     high_variance_count = sum(1 for r in all_results if r.get("high_variance"))
+    extreme_momentum_count = sum(1 for r in all_results if r.get("extreme_momentum"))
     print(
         f"[daily_forecast] TROUBLESHOOT SUMMARY: {len(all_results)} tickers processed -- "
         f"{stale_count} with stale data (> 3 trading days old, Kronos skipped), "
         f"{gap_warning_count} with a >5% baseline gap (Kronos baseline vs live market price), "
         f"{unreliable_count} unreliable (predicted change > 15%), "
-        f"{high_variance_count} with high variance (> 3% std dev across {SAMPLE_RUNS} runs)",
+        f"{high_variance_count} with high variance (> 3% std dev across {SAMPLE_RUNS} runs), "
+        f"{extreme_momentum_count} skipped for extreme 12-month momentum "
+        f"(> {MOMENTUM_12M_SKIP_THRESHOLD}%, Kronos never called)",
         file=sys.stderr,
     )
 

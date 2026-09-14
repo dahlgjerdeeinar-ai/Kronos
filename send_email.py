@@ -149,7 +149,14 @@ MOVEMENT_FORECAST_CELL = """<td style="padding:6px 4px;text-align:right;font-fam
 
 MOVEMENT_EMPTY_CELL = """<td style="padding:6px 4px;text-align:right;font-family:-apple-system,sans-serif;font-size:10px;color:#ccc;">&mdash;</td>"""
 
-SIGNAL_COLOR_MAP = {"BUY": "#1a7a1a", "SELL": "#cc2222", "HOLD": "#b8860b"}
+SIGNAL_COLOR_MAP = {
+    "BUY": "#1a7a1a",
+    "SELL": "#cc2222",
+    "HOLD": "#b8860b",
+    "UNRELIABLE": "#888888",
+    "DATA STALE": "#888888",
+    "SKIP — extreme momentum, Kronos unreliable": "#888888",
+}
 
 REPEATED_SECTION_WRAPPER = """
 <div style="font-family:-apple-system,sans-serif;font-size:10px;color:#555;letter-spacing:2px;text-transform:uppercase;margin:24px 0 14px;border-bottom:1px solid #222;padding-bottom:6px;">Gjentatte screende aksjer</div>
